@@ -1,0 +1,127 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © antonametov88
+// Adapted from Robert Carver, "Advanced Futures Trading Strategies" — Strategy 13:
+// "Trend Following and Carry in Different Risk Regimes"
+//
+// NOTE: This is a single-instrument adaptation. The book's position-sizing formula
+// (IDM, instrument weight, FX rate) is stripped to IDM=1, weight=1, FX=1 because this
+// is a one-instrument strategy. Carry needs a real futures curve, so it's optional —
+// enable it only if you supply near/far contract tickers for the same underlying.
+// This is a template/starting point: test thoroughly (In-/Out-of-sample, costs,
+// slippage) before trusting it with real capital.
+
+//@version=6
+strategy("Trend + Carry, Risk-Regime Sized (Strategy 13)", overlay=true,
+     fill_orders_on_standard_ohlc = true, default_qty_type = strategy.fixed,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.01)
+
+// ============================= INPUTS =============================
+// -- Trend (EWMAC N / 4N) --
+fastLen     = input.int(64,  title="Fast EMA Length (N)",  group="Trend")
+slowLen     = input.int(256, title="Slow EMA Length (4N)", group="Trend")
+trendScalar = input.float(3.9, title="Trend Forecast Scalar", group="Trend",
+     tooltip="Scales the raw forecast so its average absolute value is roughly 10. ~3.9 is the book's approximate scalar for EWMAC(64,256); recalibrate per instrument if you can.")
+
+// -- Carry (optional, needs two futures contracts on the curve) --
+useCarry        = input.bool(false, title="Include Carry Forecast?", group="Carry")
+frontSymbol     = input.symbol("",  title="Front (near) contract",   group="Carry")
+backSymbol      = input.symbol("",  title="Back (far) contract",     group="Carry")
+annualizeFactor = input.float(4.0,  title="Carry Annualization Factor", group="Carry",
+     tooltip="Roughly 12 / (months between front & back contract). 4 for quarterly-spaced contracts, 1 for a 12-month gap, etc.")
+carrySpan   = input.int(90, title="Carry Smoothing (EWMA span, bars)", group="Carry")
+carryScalar = input.float(30.0, title="Carry Forecast Scalar", group="Carry")
+
+// -- Volatility regime --
+volLen      = input.int(25,   title="Daily Vol Lookback (bars)",   group="Volatility Regime")
+longRunLen  = input.int(1250, title="Long-Run Vol Average Length", group="Volatility Regime",
+     tooltip="Book uses ~2560 days (10y). Lowered default so it can populate on shorter histories/timeframes.")
+percLen     = input.int(1250, title="Percentile Lookback for Q",   group="Volatility Regime")
+capForecast = input.float(20, title="Forecast Cap (+/-)",          group="Volatility Regime")
+
+// -- Position sizing (simplified single-instrument version of the book's N formula) --
+riskTargetPct  = input.float(20, title="Annualized Risk Target (% of equity)", group="Position Sizing",
+     tooltip="How much annualized volatility of returns you want the strategy to run at, e.g. 20%.")
+pointValue     = input.float(1, title="Contract/Point Value", group="Position Sizing",
+     tooltip="Dollar value of a 1-point move, 1 for stocks/spot, the futures multiplier for futures (e.g. 50 for an ES-style contract).")
+maxLeverageMult = input.float(4.0, title="Max Position Cap (x of a flat, forecast=10 size)", group="Position Sizing",
+     tooltip="Safety cap so a data glitch (e.g. near-zero volatility) can't blow the position size up to something absurd.")
+rebalanceThresholdPct = input.float(10, title="Rebalance Buffer (% of the forecast=10 base size)", group="Position Sizing",
+     tooltip="Buffer width as a % of baseQty (the size at forecast=10), not of the current target. A buffer sized off the *current* target shrinks to nothing whenever the forecast is weak or oscillating near zero — exactly the choppy conditions where you want the widest buffer, not the narrowest. This keeps the buffer a constant width regardless of current forecast strength.")
+roundToWhole = input.bool(true, title="Round Quantity to Whole Units", group="Position Sizing",
+     tooltip="Turn off for instruments that support fractional sizing (e.g. some crypto).")
+
+// ============================= VOLATILITY REGIME =============================
+logRet        = math.log(close / close[1])
+dailyVolPct   = ta.stdev(logRet, volLen) * math.sqrt(252) * 100
+longRunAvgVol = ta.sma(dailyVolPct, longRunLen)
+
+V = dailyVolPct / longRunAvgVol
+Q = ta.percentrank(V, percLen) / 100
+
+rawM = 2 - 1.5 * Q
+M    = ta.ema(rawM, 10)
+
+// ============================= TREND FORECAST =============================
+emaFast  = ta.ema(close, fastLen)
+emaSlow  = ta.ema(close, slowLen)
+priceVol = ta.stdev(close - close[1], volLen)
+
+rawTrendForecast = priceVol != 0 ? (emaFast - emaSlow) / priceVol * trendScalar : 0.0
+adjTrendForecast = math.max(math.min(rawTrendForecast * M, capForecast), -capForecast)
+
+// ============================= CARRY FORECAST (optional) =============================
+frontClose = useCarry and frontSymbol != "" ? request.security(frontSymbol, timeframe.period, close) : na
+backClose  = useCarry and backSymbol  != "" ? request.security(backSymbol,  timeframe.period, close) : na
+
+carryRawPct      = useCarry ? (frontClose - backClose) / frontClose * annualizeFactor * 100 : na
+carrySmoothed    = useCarry ? ta.ema(carryRawPct, carrySpan) : na
+priceVolPct      = priceVol / close * 100
+rawCarryForecast = useCarry and priceVolPct != 0 ? carrySmoothed / priceVolPct * carryScalar / 100 : na
+adjCarryForecast = useCarry ? math.max(math.min(rawCarryForecast * M, capForecast), -capForecast) : na
+
+// ============================= COMBINED FORECAST =============================
+fdm = useCarry ? 1.1 : 1.0
+combinedForecastRaw = useCarry ? (adjTrendForecast + adjCarryForecast) / 2 * fdm : adjTrendForecast
+combinedForecast    = math.max(math.min(combinedForecastRaw, capForecast), -capForecast)
+
+// ============================= POSITION SIZE =============================
+// Simplified version of the book's N = Forecast * Capital * riskTarget / (10 * Multiplier * Price * annualizedVol%)
+// This is a CONTINUOUSLY REBALANCED position, like the book: every bar we compute the
+// signed target size implied by the current forecast, and trade the delta versus what we
+// already hold. (An earlier version of this script only sized on the bar the forecast
+// crossed zero — which is exactly when the forecast is weakest — locking in an
+// under-sized position for the whole trade. This fixes that.)
+annualizedVolDecimal = dailyVolPct / 100
+
+baseQty = annualizedVolDecimal != 0 ?
+     strategy.equity * (riskTargetPct / 100) / (annualizedVolDecimal * pointValue * close) : na
+
+maxAbsQty  = baseQty * maxLeverageMult
+targetQty  = combinedForecast / 10 * baseQty
+targetQty := na(targetQty) ? na : math.max(math.min(targetQty, maxAbsQty), -maxAbsQty)
+if roundToWhole and not na(targetQty)
+    targetQty := math.round(targetQty)
+
+// ============================= REBALANCE =============================
+// Buffer width is a constant % of baseQty (the "forecast = 10" reference size), NOT of the
+// current target — a target-relative buffer collapses to ~zero exactly when the forecast
+// is weak/choppy, which is backwards (that's when you want the widest buffer, to avoid
+// trading on noise near the zero line).
+delta          = na(targetQty) ? 0.0 : targetQty - strategy.position_size
+minMoveToTrade = na(baseQty) ? na : math.abs(baseQty) * (rebalanceThresholdPct / 100)
+
+if not na(targetQty) and not na(minMoveToTrade) and math.abs(delta) > minMoveToTrade and math.abs(delta) >= (roundToWhole ? 1 : 0.0001)
+    if delta > 0
+        strategy.order("Rebalance Long", strategy.long, qty = math.abs(delta))
+    else
+        strategy.order("Rebalance Short", strategy.short, qty = math.abs(delta))
+
+// ============================= PLOTS =============================
+plot(emaFast, title="Fast EMA", color=color.blue)
+plot(emaSlow, title="Slow EMA", color=color.orange)
+
+plot(combinedForecast, title="Combined Forecast", color=color.purple, display=display.data_window)
+plot(M, title="Vol Multiplier (M)", color=color.teal, display=display.data_window)
+plot(Q, title="Vol Percentile (Q)", color=color.gray, display=display.data_window)
+
+bgcolor(Q > 0.75 ? color.new(color.red, 90) : Q < 0.25 ? color.new(color.green, 90) : na, title="Vol Regime shading")

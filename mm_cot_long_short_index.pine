@@ -1,0 +1,77 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © antonametov88
+//
+// MM COT Long/Short Index — Managed Money positioning, CFTC Disaggregated COT report.
+//
+// IMPORTANT — VERIFY THE SYMBOLS BEFORE TRUSTING THIS:
+// TradingView's exact ticker for "Managed Money Positions - Long/Short" was reconstructed
+// from search results, not confirmed by opening the live TradingView symbol page (my usual
+// double-check tools were unavailable when this was written). The defaults below
+// (COT2:088691_F_MMP_L_OLD / _S_OLD) are my best reconstruction for Gold. To confirm or
+// fix them yourself: click the symbol inputs below in this indicator's settings, type
+// "088691" (Gold's CFTC code) into the symbol search, and look through the COT2-prefixed
+// results for "Managed Money Positions - Long" and "... - Short" — pick those exact
+// entries. If a symbol input shows "n/a" in the table, that symbol didn't resolve.
+//
+// For a different commodity/future, look up its CFTC code (visible on the CFTC COT report
+// itself, or via a site like tradingster.com/cot) and search for that code instead.
+//
+// WHAT THIS COMPUTES:
+// The "Long/Short Index" isn't the raw position size — it's where the CURRENT position
+// sits relative to its own recent range (a rolling min/max), rescaled to -100..+100.
+// +100 = Managed Money is at the top of its recent range for that side (long or short).
+// -100 = Managed Money is at the bottom of its recent range for that side.
+// This is standard "COT Index" methodology (a stochastic-style oscillator on positioning),
+// popularized by several COT analysts — it's what lets you compare a market with 50,000
+// contracts of MM longs to one with 500,000, on the same -100..100 scale.
+
+//@version=6
+indicator("MM COT Long/Short Index", overlay=false)
+
+// ============================= INPUTS =============================
+mmLongSymbol  = input.symbol("COT2:088691_F_MMP_L_OLD", title="Managed Money LONG position symbol",  group="Data Source")
+mmShortSymbol = input.symbol("COT2:088691_F_MMP_S_OLD", title="Managed Money SHORT position symbol", group="Data Source")
+
+lookbackWeeks = input.int(156, title="Index Lookback (weeks)", group="Calculation",
+     tooltip="Rolling window the current position is ranked against. COT is published weekly, so this is requested on a fixed weekly timeframe regardless of your chart's timeframe. 156 ≈ 3 years, a common convention; some analysts use 52 (1yr) or 260 (5yr).")
+
+// ============================= DATA (COT is weekly — pin to W regardless of chart TF) =============================
+mmLongPos  = request.security(mmLongSymbol,  "W", close, ignore_invalid_symbol = true)
+mmShortPos = request.security(mmShortSymbol, "W", close, ignore_invalid_symbol = true)
+
+// ============================= INDEX CALCULATION =============================
+longMin = ta.lowest(mmLongPos, lookbackWeeks)
+longMax = ta.highest(mmLongPos, lookbackWeeks)
+longIndex = na(mmLongPos) or (longMax == longMin) ? na : (mmLongPos - longMin) / (longMax - longMin) * 200 - 100
+
+shortMin = ta.lowest(mmShortPos, lookbackWeeks)
+shortMax = ta.highest(mmShortPos, lookbackWeeks)
+shortIndex = na(mmShortPos) or (shortMax == shortMin) ? na : (mmShortPos - shortMin) / (shortMax - shortMin) * 200 - 100
+
+// ============================= PLOTS =============================
+plot(longIndex,  title="MM Long Index",  color=color.new(color.green, 0), linewidth=2)
+plot(shortIndex, title="MM Short Index", color=color.new(color.red, 0),   linewidth=2)
+hline(0,    "Midpoint",   color=color.gray, linestyle=hline.style_dotted)
+hline(80,   "Long Extreme (crowded)",  color=color.new(color.green, 60), linestyle=hline.style_dashed)
+hline(-80,  "Short Extreme (crowded)", color=color.new(color.red, 60),   linestyle=hline.style_dashed)
+
+// ============================= TABLE (current readings + raw positions) =============================
+var table dash = table.new(position.top_right, 2, 4, border_width = 1)
+
+fmt(x)   => na(x) ? "n/a" : str.tostring(x, "#.#")
+fmtPos(x) => na(x) ? "n/a" : str.tostring(x, "#,###")
+
+if barstate.islast
+    table.cell(dash, 0, 0, "MM Long Position",  text_halign = text.align_left)
+    table.cell(dash, 1, 0, fmtPos(mmLongPos),    text_halign = text.align_right)
+
+    table.cell(dash, 0, 1, "MM Short Position",  text_halign = text.align_left)
+    table.cell(dash, 1, 1, fmtPos(mmShortPos),   text_halign = text.align_right)
+
+    table.cell(dash, 0, 2, "Long Index",  text_halign = text.align_left)
+    table.cell(dash, 1, 2, fmt(longIndex), text_halign = text.align_right,
+         bgcolor = na(longIndex) ? na : color.new(color.green, 70), text_color = color.white)
+
+    table.cell(dash, 0, 3, "Short Index", text_halign = text.align_left)
+    table.cell(dash, 1, 3, fmt(shortIndex), text_halign = text.align_right,
+         bgcolor = na(shortIndex) ? na : color.new(color.red, 70), text_color = color.white)

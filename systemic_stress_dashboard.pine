@@ -1,0 +1,140 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © antonametov88
+//
+// "Systemic Stress" dashboard — an ORIGINAL approximation, not a reproduction of any
+// specific published indicator. You didn't have the source script/name for the panel
+// in your screenshot, so this builds a transparent, checkable version from standard
+// building blocks instead of guessing at someone else's exact formula:
+//
+//   - VIX Percentile     : percentile rank of the VIX within its own recent history
+//   - COR1M Percentile   : percentile rank of Cboe's 1-Month S&P 500 Implied Correlation
+//                          Index (ticker COR1M) within its own recent history
+//   - Credit Percentile  : (extra, off-screen by default) percentile of a simple credit-
+//                          stress proxy built from HYG vs LQD (junk bonds vs investment
+//                          grade) — junk underperforming = credit stress rising
+//   - Systemic Stress    : weighted average of the percentiles above (weights are inputs)
+//   - Stress Impulse     : how much Systemic Stress has moved over the last N bars
+//                          (negative = stress easing, positive = stress building)
+//   - Market Regime      : label derived from thresholds on Systemic Stress
+//
+// IMPORTANT CAVEATS:
+//   - COR1M may not be available on your TradingView plan/exchange feed. If it fails to
+//     resolve, this script excludes it and re-normalizes the remaining weights rather
+//     than erroring out — check the COR1M Percentile cell; if it stays blank, the symbol
+//     didn't resolve and you may need a different ticker/exchange prefix.
+//   - The specific weights, lookback, and regime thresholds are reasonable defaults, not
+//     a match to any specific published index — tune them to your taste, or swap this
+//     against the real source panel's numbers once you find it to calibrate.
+
+//@version=6
+indicator("Systemic Stress Dashboard (approximation)", overlay=false)
+
+// ============================= INPUTS =============================
+vixSymbol   = input.symbol("TVC:VIX",     title="VIX Symbol",   group="Data Sources")
+corSymbol   = input.symbol("CBOE:COR1M",  title="COR1M Symbol", group="Data Sources")
+creditLongSymbol  = input.symbol("AMEX:LQD", title="Investment-Grade Bond ETF", group="Data Sources")
+creditShortSymbol = input.symbol("AMEX:HYG", title="High-Yield Bond ETF",       group="Data Sources")
+
+percentileLookback = input.int(252, title="Percentile Lookback (bars)", group="Calculation",
+     tooltip="How much history each percentile rank is measured against. 252 ≈ 1 trading year on a daily chart.")
+creditRocLen = input.int(20, title="Credit Ratio Rate-of-Change Length", group="Calculation")
+impulseLen   = input.int(5,  title="Stress Impulse Lookback (bars)",     group="Calculation",
+     tooltip="Systemic Stress now minus Systemic Stress this many bars ago.")
+
+wVix    = input.float(1.0, title="Weight: VIX Percentile",    group="Weights")
+wCor    = input.float(1.0, title="Weight: COR1M Percentile",  group="Weights")
+wCredit = input.float(0.5, title="Weight: Credit Percentile", group="Weights")
+
+calmMax     = input.float(25, title="Calm  <",     group="Regime Thresholds")
+normalMax   = input.float(50, title="Normal <",     group="Regime Thresholds")
+elevatedMax = input.float(75, title="Elevated <",   group="Regime Thresholds")
+
+showComponents = input.bool(false, title="Show Credit Stress Row Too", group="Display")
+tablePos       = input.string("top_right", title="Table Position", group="Display",
+     options=["top_right", "top_left", "bottom_right", "bottom_left"])
+
+// ============================= DATA =============================
+vixClose = request.security(vixSymbol, timeframe.period, close, ignore_invalid_symbol = true)
+corClose = request.security(corSymbol, timeframe.period, close, ignore_invalid_symbol = true)
+lqdClose = request.security(creditLongSymbol,  timeframe.period, close, ignore_invalid_symbol = true)
+hygClose = request.security(creditShortSymbol, timeframe.period, close, ignore_invalid_symbol = true)
+
+// ============================= COMPONENT PERCENTILES =============================
+vixPct = na(vixClose) ? na : ta.percentrank(vixClose, percentileLookback)
+corPct = na(corClose) ? na : ta.percentrank(corClose, percentileLookback)
+
+// Credit stress proxy: when junk bonds (HYG) underperform investment grade (LQD), the
+// ratio HYG/LQD falls — that's credit stress rising, so we invert its rate of change.
+creditRatio    = (na(hygClose) or na(lqdClose)) ? na : hygClose / lqdClose
+creditRawStress = na(creditRatio) ? na : -ta.roc(creditRatio, creditRocLen)
+creditPct       = na(creditRawStress) ? na : ta.percentrank(creditRawStress, percentileLookback)
+
+// ============================= SYSTEMIC STRESS (weighted, auto-renormalized) =============================
+wVixEff    = na(vixPct)    ? 0.0 : wVix
+wCorEff    = na(corPct)    ? 0.0 : wCor
+wCreditEff = na(creditPct) ? 0.0 : wCredit
+
+sumWeights = wVixEff + wCorEff + wCreditEff
+weightedSum = (na(vixPct) ? 0.0 : vixPct * wVixEff) + (na(corPct) ? 0.0 : corPct * wCorEff) + (na(creditPct) ? 0.0 : creditPct * wCreditEff)
+
+systemicStress = sumWeights > 0 ? weightedSum / sumWeights : na
+
+// ============================= STRESS IMPULSE =============================
+stressImpulse = na(systemicStress) or na(systemicStress[impulseLen]) ? na : systemicStress - systemicStress[impulseLen]
+
+// ============================= MARKET REGIME =============================
+regimeLabel = na(systemicStress) ? "N/A" :
+     systemicStress < calmMax ? "Calm" :
+     systemicStress < normalMax ? "Normal" :
+     systemicStress < elevatedMax ? "Elevated" : "Stressed"
+
+regimeColor = na(systemicStress) ? color.gray :
+     systemicStress < calmMax ? color.new(color.green, 0) :
+     systemicStress < normalMax ? color.new(color.blue, 0) :
+     systemicStress < elevatedMax ? color.new(color.orange, 0) : color.new(color.red, 0)
+
+// ============================= PLOTS =============================
+// Own pane below the chart (percentiles are 0-100, a different scale than price, so this
+// can't sensibly overlay on the price chart itself).
+plot(systemicStress, title="Systemic Stress",   color=color.red,    linewidth=2)
+plot(vixPct,         title="VIX Percentile",    color=color.blue)
+plot(corPct,         title="COR1M Percentile",  color=color.purple)
+plot(creditPct,      title="Credit Percentile", color=color.teal,   display = showComponents ? display.all : display.data_window)
+plot(stressImpulse,  title="Stress Impulse",    color=color.orange)
+
+hline(calmMax,     "Calm / Normal",     color=color.gray, linestyle=hline.style_dotted)
+hline(normalMax,   "Normal / Elevated", color=color.gray, linestyle=hline.style_dotted)
+hline(elevatedMax, "Elevated / Stressed", color=color.gray, linestyle=hline.style_dotted)
+hline(0,           "Zero (impulse ref)", color=color.gray, linestyle=hline.style_dashed)
+
+bgcolor(na(systemicStress) ? na : systemicStress >= elevatedMax ? color.new(color.red, 90) : na, title="Stressed regime shading")
+
+// ============================= TABLE (mimics the panel in the screenshot) =============================
+var table dash = table.new(
+     tablePos == "top_right" ? position.top_right : tablePos == "top_left" ? position.top_left : tablePos == "bottom_right" ? position.bottom_right : position.bottom_left,
+     2, 6, border_width = 1)
+
+fmt(x) => na(x) ? "n/a" : str.tostring(x, "#.#")
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Systemic Stress",  text_halign = text.align_left)
+    table.cell(dash, 1, 0, fmt(systemicStress), text_halign = text.align_right)
+
+    table.cell(dash, 0, 1, "VIX Percentile",    text_halign = text.align_left)
+    table.cell(dash, 1, 1, fmt(vixPct),         text_halign = text.align_right)
+
+    table.cell(dash, 0, 2, "COR1M Percentile",  text_halign = text.align_left)
+    table.cell(dash, 1, 2, fmt(corPct),         text_halign = text.align_right)
+
+    row = 3
+    if showComponents
+        table.cell(dash, 0, row, "Credit Percentile", text_halign = text.align_left)
+        table.cell(dash, 1, row, fmt(creditPct),       text_halign = text.align_right)
+        row := row + 1
+
+    table.cell(dash, 0, row, "Stress Impulse",  text_halign = text.align_left)
+    table.cell(dash, 1, row, fmt(stressImpulse), text_halign = text.align_right)
+    row := row + 1
+
+    table.cell(dash, 0, row, "Market Regime", text_halign = text.align_left)
+    table.cell(dash, 1, row, regimeLabel, text_halign = text.align_right, bgcolor = regimeColor, text_color = color.white)
