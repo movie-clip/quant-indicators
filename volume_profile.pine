@@ -1,0 +1,435 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © antonametov88
+//
+// Volume Profile (approximation) — a price-anchored, right-edge volume-by-price
+// histogram over the last N confirmed chart bars.
+//
+// WHAT THIS COMPUTES:
+// Window W = the last `lookbackBars` CONFIRMED chart bars (or all available bars
+// if fewer than that exist; below `minBars`, output is n/a — never padded, never
+// borrowed from elsewhere). The window's own [low, high] range is split into
+// `binCount` equal-height price bins — a bin COUNT, not a bin WIDTH, so the
+// resolution auto-scales to whatever the instrument and the window are doing.
+// Every lower-timeframe intrabar inside every window bar contributes its ENTIRE
+// volume to the single bin containing its CLOSE ("close-binning" — see below).
+// Each bin's total volume V_j is normalised to the window's busiest bin (V_max)
+// to produce a bar length L_j in [0,1], which the renderer turns into a box width.
+// Point of Control (POC) is the bin with the largest V_j; ties resolve to the
+// LOWER price bin, implemented explicitly (never left to array.indexof's default).
+// The profile answers "at which PRICES has volume traded over this window" — it
+// says nothing about buying vs selling pressure or timing. That is VSA/Wyckoff
+// territory and is explicitly out of scope for this script (D-2, rendering only).
+//
+// SOURCE — ORIGINAL, NO EXTERNAL AUTHORITY (guardrail 2):
+//   1. This is an ORIGINAL construction. There is no regulator/exchange spec for
+//      volume-at-price the way there is for a COT field, and no single named
+//      methodology to cite. The nearest named method, J. Peter Steidlmayer's
+//      Market Profile (CBOT), is TPO — time-at-price, a genuinely different
+//      measurement — so citing it here would be a false citation, worse than
+//      declaring ORIGINAL.
+//   2. Built from LOWER-TIMEFRAME CANDLE CLOSES via request.security_lower_tf(),
+//      never tick data. This is an estimate and is NEVER tick-exact, even when
+//      intrabar data is fully available.
+//   3. This is NOT TradingView's native Volume Profile tool (which is computed
+//      server-side from tick data with an unpublished exact construction) and
+//      will NOT agree with it bar for bar. Do not expect the two to line up —
+//      see the falsification checks below, which test disagreement, not parity.
+//
+// CLOSE-BINNING, NOT RANGE-SPREADING (a definitional choice, not a correctness
+// one — stated so nobody "fixes" it later):
+// Each lower-timeframe intrabar's ENTIRE volume goes to the one bin containing
+// its CLOSE. The rejected alternative — spreading an intrabar's volume across
+// every bin its [low, high] touches — is NOT implemented: it smears volume into
+// prices where nothing necessarily traded, manufacturing apparent high-volume
+// nodes at bin boundaries and softening the exact POC this script exists to
+// locate. Close-binning's error instead concentrates at the intrabar's last
+// print and shrinks as the lower timeframe gets finer.
+//
+// ROLLING WINDOW — READ THIS BEFORE TRUSTING A PAST SCREENSHOT:
+// This script renders exactly ONE profile, anchored at the right edge,
+// describing the last N bars AS OF NOW. Bin boundaries depend on the window's
+// own [low, high] range, so they are NOT stable across bars — a new extreme
+// re-lays every bin, and two consecutive bars' profiles are not comparable
+// bin-for-bin. As the window rolls forward, today's profile is NOT the profile
+// that existed three weeks ago even though it is drawn over the same chart: a
+// level read off today's POC was computed from bars that, three weeks ago, had
+// not happened yet. Bar-replay review of this indicator is misleading unless the
+// replay itself re-anchors the window.
+//
+// DEGRADING VISIBLY — WHAT THE ON-CHART TABLE SHOWS AND WHY (guardrail 5):
+//   - "Window (bars)"     M of N confirmed bars actually in the window. M < N
+//                          until N bars of history exist. Below `minBars`, the
+//                          whole profile is n/a (the range extremes would be set
+//                          by one or two bars, not a distribution).
+//   - "Coverage"           C of M window bars for which request.security_lower_tf()
+//                          returned ANY intrabar data. C = 0 -> NO profile at
+//                          all, "n/a — no intrabar data" — never an empty-looking
+//                          flat profile. 0 < C < M -> profile computed from the
+//                          covered bars only, labelled, NEVER renormalised,
+//                          extrapolated or scaled up to hide the gap.
+//   - "Intrabars/bar"      The REALISED average intrabars-per-bar over the
+//                          covered window, against this script's own 50-100/bar
+//                          target. TradingView's intrabar-history budget is a
+//                          SHARED POOL (100K-200K intrabars depending on plan,
+//                          via calc_bars_count) that trades precision for
+//                          coverage across the whole request rather than failing
+//                          individual bars to na — so a bar can come back with
+//                          SOME data yet far fewer intrabars than the target,
+//                          which the binary "C of M" check alone cannot see.
+//                          Materially below target is flagged DEGRADED here,
+//                          distinct from C < M (bars missing entirely).
+//   - "Reconciliation"     Sum of all binned volume divided by the sum of the
+//                          covered bars' native chart volume. Should read ~1.00
+//                          — a closed invariant of the construction ONLY WHEN
+//                          Status reads a bare "OK" (no na-skip note): every
+//                          intrabar's volume then goes to exactly one bin, and
+//                          intrabar volumes over a chart bar sum to that bar's
+//                          volume. When Status instead reads "OK — N na
+//                          intrabar(s) skipped", the invariant is conditional,
+//                          not closed: a skipped intrabar's volume leaves this
+//                          numerator while its bar's full native volume stays
+//                          in the denominator, so the ratio falls below 1.00
+//                          BY CONSTRUCTION, by exactly the skipped volume's
+//                          share — one na intrabar out of twelve in this
+//                          script's own worked case gives 2070/2470 = 0.8381,
+//                          a flagged CHECK next to "OK — 1 na intrabar(s)
+//                          skipped". That shortfall is the expected reading of
+//                          the flagged Status, not a separate defect: read the
+//                          two rows together. Far from 1.00 WITH A BARE "OK"
+//                          Status (no na-skip note) means intrabars are being
+//                          dropped, double-counted, or the close/volume arrays
+//                          are misaligned — THAT combination is what makes the
+//                          whole profile suspect, not every low ratio
+//                          unconditionally.
+//   - "Status"             OK only when every intrabar in the window had both a
+//                          close and a volume. If request.security_lower_tf()
+//                          returns na for either on some (not all) intrabars,
+//                          that intrabar is skipped — never binned, never
+//                          allowed to win or poison a bin's V_j — and Status
+//                          reads "OK — N na intrabar(s) skipped" instead of a
+//                          bare OK, so an incomplete-but-plausible-looking
+//                          profile is never reported as unqualified OK. (The
+//                          all-na case, where every intrabar in the window is
+//                          na, still degrades to the "no intrabar data" /
+//                          "no volume reported" n/a branches below, unchanged.)
+// FORBIDDEN, and NOT implemented anywhere in this script:
+//   - Falling back to spreading a chart bar's aggregate volume across its own
+//     [low, high] when intrabar data is unavailable. It produces a smooth,
+//     complete, plausible-looking profile that measures nothing.
+//   - Carrying the previous computation's profile forward when the current one
+//     fails. Every recompute starts from nothing; a failure renders n/a, never
+//     a stale shape left on screen.
+//
+// includeCurrentBar (default FALSE): when true, the window includes the still-
+// developing bar and the profile is PROVISIONAL — every L_j can shift, and the
+// POC can migrate and migrate back within a single session, because V_max and
+// [R_lo, R_hi] are taken over the same window as the developing bar's volume
+// accumulates. An on-chart PROVISIONAL label appears whenever this is on.
+// Default FALSE keeps the window to closed bars only, so the profile changes
+// only at a bar close (guardrail 1 — no repainting in the default state).
+//
+// KNOWN LIMITATIONS NOT DETECTABLE FROM THE SCRIPT (disclosed, not corrected):
+//   - Overnight gaps: bins spanning a gap legitimately receive zero volume and
+//     render identically to a genuine low-volume node — different facts, same
+//     appearance. Not imputed across.
+//   - Holidays/half-days: fewer intrabars and less volume; because the profile
+//     is volume-weighted, not bar-weighted, this needs no correction.
+//   - Chart session setting (RTH vs extended hours) changes which intrabars
+//     exist and therefore the profile, particularly around the closing-auction
+//     print that carries a large share of a US equity's daily volume. Not a bug.
+//   - ETF creation/redemption volume can produce a high-volume node that is
+//     authorised-participant activity, not accepted value at that price.
+//   - A symbol whose volume is a TICK COUNT rather than a traded quantity
+//     (common on FX/CFDs) is a well-defined profile of something else — ticks
+//     at price, not size at price. Only the trader can tell; the script cannot.
+//   - request.footprint() would give TradingView-native intrabar binning instead
+//     of this candle-close approximation. Considered, not implemented: its
+//     signature, plan/symbol availability and history limits were not verified
+//     against the official Pine v6 reference by the research this script was
+//     built from.
+//   - No external symbol is requested (chart symbol only, at a lower timeframe),
+//     so guardrail 3 (symbols verified, never reconstructed) does not engage —
+//     there is no ticker to reconstruct or confirm.
+//
+// OUT OF SCOPE (considered, excluded, not overlooked): Value Area / VAH / VAL
+// (needs a specific Market Profile construction that could not be cited from a
+// sourced authority — guardrail 2); buy/sell split, delta, order-flow
+// classification and any VSA/Wyckoff demand-supply reading (rendering only, per
+// decision D-2); multiple profiles per chart; alerts.
+//
+// FALSIFICATION (run during the compile check, in the TradingView editor):
+//   1. The "Reconciliation" row must read ~1.00. If not, the profile is not a
+//      decomposition of the volume it claims to decompose.
+//   2. Compare against TradingView's native Fixed Range Volume Profile over the
+//      same bars: this script's POC bin should contain the native POC and the
+//      top three bins by volume should roughly match. Disagreement falsifies
+//      the approximation; agreement does not validate it (the native tool is
+//      tick-based and this script explicitly does not reproduce it).
+//   3. A liquid US equity's closing-auction volume concentration should appear
+//      as a node at the closing print across a window of such days; if it does
+//      not, volume is being dropped, most likely outside the sampled
+//      lower-timeframe bars or the chart's session setting.
+
+//@version=6
+indicator("Volume Profile (approximation)", overlay = true,
+     max_boxes_count = 500, max_labels_count = 50)
+
+// ============================= INPUTS =============================
+lookbackBars = input.int(120, title = "Lookback (bars)", minval = 20, maxval = 1000, group = "Window & Coverage",
+     tooltip = "Window length in BARS: the profile is built from the last N confirmed chart bars, not TradingView's visible range. Units: bars — 120 is ~6 months on a daily chart, ~6 hours on a 3-minute chart. Feel-chosen default, not derived from any source (see the script header, WHAT THIS COMPUTES). Keep this comfortably inside TradingView's shared intrabar-history budget — the Coverage/Intrabars-per-bar rows below will flag it if you do not. Must be >= Minimum Bars Required below to ever produce a profile.")
+
+minBars = input.int(20, title = "Minimum Bars Required", minval = 4, maxval = 500, group = "Window & Coverage",
+     tooltip = "Units: bars. Below this many confirmed bars in the window, the range extremes are set by one or two bars and the output is n/a rather than a profile. Feel-chosen floor, not derived from any source.")
+
+includeCurrentBar = input.bool(false, title = "Include Current (Unclosed) Bar — PROVISIONAL", group = "Window & Coverage",
+     tooltip = "Default false: the window is the last N CONFIRMED bars only, so the profile changes only at a bar close (no repaint). If true, the still-developing bar is included and the profile becomes PROVISIONAL — every bin length and the Point of Control can shift, and migrate back, as that bar's volume accumulates. The chart carries a PROVISIONAL label whenever this is on.")
+
+binCount = input.int(24, title = "Bin Count", minval = 4, maxval = 100, group = "Profile",
+     tooltip = "Units: bins (a COUNT, not a price width — it auto-scales to whatever the instrument and window are doing). Feel-chosen default, not derived from any source (see the script header, WHAT THIS COMPUTES): below ~12 the POC band is too wide to place a stop against; above ~48 each bin holds too few intrabar prints on a typical daily-chart window and the profile becomes sampling noise rather than a distribution.")
+
+ltfResolution = input.timeframe("", title = "Lower-Timeframe Override (blank = auto)", group = "Lower-Timeframe Data",
+     tooltip = "Leave blank to auto-select: 5 minutes on Daily-and-above chart timeframes, 1 minute below Daily. Target is 50-100 intrabars per chart bar (see the Intrabars/bar diagnostic). Override only with a specific reason — a timeframe that is not strictly lower than the chart's own timeframe returns no intrabar data for every bar, which reads as n/a here rather than a fabricated value (guardrail 5).")
+
+// ============================= LOWER-TIMEFRAME RESOLUTION (auto per chart TF, or override) =============================
+autoLtf   = timeframe.in_seconds() >= timeframe.in_seconds("1D") ? "5" : "1"
+ltfActual = ltfResolution == "" ? autoLtf : ltfResolution
+
+// ============================= INTRABAR FETCH (every bar, unconditionally) =============================
+// No `lookahead` argument: request.security_lower_tf()'s lower-timeframe intrabars
+// are, by construction, already-closed data within the current chart bar — there
+// is no forward-looking value to guard against the way there is with
+// request.security() on a higher/same timeframe (see the Repaint analysis this
+// script was built from). Static-checker note: pine_check.py's P008 advisory
+// pattern-matches "request.security(...)" generically and also fires on this
+// call for having no literal "lookahead" text; request.security_lower_tf() has
+// no such parameter to pass, so it is left out deliberately rather than guessed
+// at (see this order's risks).
+[ltfCloses, ltfVols] = request.security_lower_tf(syminfo.tickerid, ltfActual, [close, volume],
+     ignore_invalid_timeframe = true)
+
+// Pine v6 does not support nested typed arrays (array<array<float>>) —
+// CE10022, confirmed by live compile (compile.md § Attempt 1). Replaced with
+// a flat array per quantity plus a parallel per-bar intrabar-count queue:
+// closesFlat/volsFlat hold every queue position's intrabars concatenated in
+// queue order, and countsQueue[i] gives position i's intrabar count so the
+// binning loop can find each bar's slice. Push/shift-when-over-length
+// semantics are unchanged from the nested-array version — countsQueue is
+// pushed/shifted exactly where closesQueue was, one entry per bar, and
+// closesFlat/volsFlat are pushed/shifted that bar's exact intrabar count at
+// a time, so the window still holds precisely the last lookbackBars + 1
+// bars' worth of intrabar data.
+var array<float> closesFlat  = array.new<float>()
+var array<float> volsFlat    = array.new<float>()
+var array<int>   countsQueue = array.new<int>()
+var array<float> barVolQueue = array.new<float>()
+
+nIntrabars = array.size(ltfCloses)
+if nIntrabars > 0
+    // Guarded on nIntrabars > 0: a bare "for k = 0 to nIntrabars - 1" with
+    // nIntrabars == 0 would be "for k = 0 to -1", and Pine's for-loop
+    // direction is inferred from start vs end — end < start makes it count
+    // DOWN, so it would run twice (k = 0, then k = -1) instead of zero times.
+    for k = 0 to nIntrabars - 1
+        array.push(closesFlat, array.get(ltfCloses, k))
+        array.push(volsFlat,   array.get(ltfVols, k))
+array.push(countsQueue, nIntrabars)
+array.push(barVolQueue, volume)
+if array.size(countsQueue) > lookbackBars + 1
+    oldCount = array.shift(countsQueue)
+    if oldCount > 0
+        // Same reverse-direction guard as above, applied to the shift side.
+        for k = 0 to oldCount - 1
+            array.shift(closesFlat)
+            array.shift(volsFlat)
+    array.shift(barVolQueue)
+
+// ============================= WINDOW RANGE (last N confirmed bars, or including the current one) =============================
+srcLow   = includeCurrentBar ? low  : low[1]
+srcHigh  = includeCurrentBar ? high : high[1]
+rangeLen = math.min(lookbackBars, includeCurrentBar ? bar_index + 1 : bar_index)
+safeLen  = math.max(rangeLen, 1)
+rLoRaw   = ta.lowest(srcLow, safeLen)
+rHiRaw   = ta.highest(srcHigh, safeLen)
+rLo      = rangeLen > 0 ? rLoRaw : na
+rHi      = rangeLen > 0 ? rHiRaw : na
+
+// ============================= PERSISTENT DRAW OBJECTS AND DIAGNOSTICS TABLE =============================
+var box[]   profileBoxes  = array.new<box>()
+var label[] profileLabels = array.new<label>()
+var table   diag          = table.new(position.bottom_right, 2, 9, border_width = 1)
+
+fmtN(x)     => na(x) ? "n/a" : str.tostring(x, "#.####")
+fmtPrice(x) => na(x) ? "n/a" : str.tostring(x, format.mintick)
+fmtVol(x)   => na(x) ? "n/a" : str.tostring(x, "#,###")
+
+// ============================= COMPUTE AND RENDER (last bar only — a single "as of now" snapshot) =============================
+if barstate.islast
+    // clear the previous snapshot's draw objects before redrawing
+    // Guarded on array.size(...) > 0: a bare "for i = 0 to array.size(...) - 1"
+    // on an empty array (true on every chart's first render, since these are
+    // var arrays starting empty) would be "for i = 0 to -1", and Pine's for-loop
+    // direction is inferred from start vs end — end < start makes it count
+    // DOWN, so it would run twice (i = 0, then i = -1) instead of zero times.
+    if array.size(profileBoxes) > 0
+        for i = 0 to array.size(profileBoxes) - 1
+            box.delete(array.get(profileBoxes, i))
+    array.clear(profileBoxes)
+    if array.size(profileLabels) > 0
+        for i = 0 to array.size(profileLabels) - 1
+            label.delete(array.get(profileLabels, i))
+    array.clear(profileLabels)
+
+    qSize      = array.size(countsQueue)
+    usableSize = includeCurrentBar ? qSize : qSize - 1
+    m          = math.min(lookbackBars, math.max(usableSize, 0))
+
+    string reason = ""
+    if m < minBars
+        reason := "n/a — fewer than minimum bars required (" + str.tostring(m) + "/" + str.tostring(minBars) + ")"
+
+    int c                    = 0
+    int totalIntrabars       = 0
+    float sumBarVolumeCovered = 0.0
+    array<float> vj          = na
+    int pocIdx                = -1
+    float vMax                = 0.0
+    float sumVj                = na
+    float pocMid               = na
+    float pocRawVol            = na
+    int naIntrabars            = 0
+
+    if reason == ""
+        endIdx   = includeCurrentBar ? qSize - 1 : qSize - 2
+        startIdx = endIdx - m + 1
+        float h  = na
+
+        if (rHi - rLo) <= 0
+            reason := "n/a — degenerate range (window high <= low)"
+        else
+            h := (rHi - rLo) / binCount
+            vj := array.new_float(binCount, 0.0)
+            // offset is the flat-array cursor: countsQueue[idx] gives queue
+            // position idx's intrabar count, and closesFlat/volsFlat hold every
+            // position's intrabars concatenated in queue order, so position
+            // idx's slice starts at the sum of all earlier positions' counts.
+            // Compute that sum once for startIdx, then walk it forward by each
+            // position's own count as idx advances — O(m), not O(m^2).
+            offset = 0
+            if startIdx > 0
+                // Same reverse-direction for-loop guard as the push/shift block.
+                for i = 0 to startIdx - 1
+                    offset += array.get(countsQueue, i)
+            for idx = startIdx to endIdx
+                n = array.get(countsQueue, idx)
+                if n > 0
+                    c += 1
+                    totalIntrabars += n
+                    sumBarVolumeCovered += array.get(barVolQueue, idx)
+                    for k = 0 to n - 1
+                        p = array.get(closesFlat, offset + k)
+                        v = array.get(volsFlat, offset + k)
+                        // Guardrail 5: a na close or volume for this single intrabar must
+                        // not poison its bin into na (which would silently make that bin
+                        // unwinnable for POC) and a na close must not reach array.set as a
+                        // na index, which would throw at runtime. Skip the contribution and
+                        // count it instead — see naIntrabars below and CR-1.
+                        if na(p) or na(v)
+                            naIntrabars += 1
+                        else
+                            binIdx = math.max(0, math.min(binCount - 1, math.floor((p - rLo) / h)))
+                            array.set(vj, binIdx, array.get(vj, binIdx) + v)
+                offset += n
+
+            if c == 0
+                reason := "n/a — no intrabar data"
+            else
+                for j = 0 to binCount - 1
+                    vv = array.get(vj, j)
+                    if vv > vMax
+                        vMax := vv
+                        pocIdx := j
+                if vMax <= 0
+                    reason := "n/a — no volume reported for this symbol"
+                else
+                    s = 0.0
+                    for j = 0 to binCount - 1
+                        s += array.get(vj, j)
+                    sumVj := s
+
+        if reason == ""
+            // ----- render the profile (V_max > 0 guaranteed above the L_j division) -----
+            rightAnchor    = bar_index + 2
+            maxBoxWidthBars = 40
+            for j = 0 to binCount - 1
+                loP   = rLo + j * h
+                hiP   = rLo + (j + 1) * h
+                lj    = array.get(vj, j) / vMax
+                width = math.round(lj * maxBoxWidthBars)
+                leftX = rightAnchor - width
+                isPoc = j == pocIdx
+                bx = box.new(left = leftX, top = hiP, right = rightAnchor, bottom = loP,
+                     border_color = color.new(color.blue, 40),
+                     bgcolor = isPoc ? color.new(color.orange, 15) : color.new(color.blue, 75),
+                     extend = extend.none)
+                array.push(profileBoxes, bx)
+
+            pocLo     = rLo + pocIdx * h
+            pocHi     = rLo + (pocIdx + 1) * h
+            pocMid   := (pocLo + pocHi) / 2
+            pocRawVol := vMax
+
+            pocLabel = label.new(x = rightAnchor, y = pocMid,
+                 text = "POC " + fmtPrice(pocMid) + "  raw " + fmtVol(vMax),
+                 style = label.style_label_left, color = color.new(color.orange, 0),
+                 textcolor = color.white, size = size.small)
+            array.push(profileLabels, pocLabel)
+
+    if includeCurrentBar
+        provLabel = label.new(x = bar_index, y = high, text = "PROVISIONAL — includes unclosed bar",
+             style = label.style_label_down, color = color.new(color.red, 0),
+             textcolor = color.white, size = size.small)
+        array.push(profileLabels, provLabel)
+
+    // ----- diagnostics (always visible, never a tooltip — guardrail 5) -----
+    avgIntrabars = c > 0 ? totalIntrabars / c : na
+    degraded     = c > 0 and avgIntrabars < 50
+    ratio        = (not na(sumVj) and sumBarVolumeCovered > 0) ? sumVj / sumBarVolumeCovered : na
+
+    windowText     = str.tostring(m) + " of " + str.tostring(lookbackBars)
+    coverageText   = str.tostring(c) + " of " + str.tostring(m)
+    intrabarsText  = na(avgIntrabars) ? "n/a" : fmtN(avgIntrabars) + (degraded ? " — DEGRADED (target 50-100)" : " (target 50-100)")
+    ratioText      = na(ratio) ? "n/a" : fmtN(ratio) + (math.abs(ratio - 1.0) > 0.02 ? " — CHECK" : "")
+    string statusOk        = includeCurrentBar ? "OK — PROVISIONAL" : "OK"
+    string statusOkFlagged = statusOk + " — " + str.tostring(naIntrabars) + " na intrabar(s) skipped"
+    statusText     = reason != "" ? reason : (naIntrabars > 0 ? statusOkFlagged : statusOk)
+
+    table.cell(diag, 0, 0, "Volume Profile Diagnostics", text_halign = text.align_left)
+    table.cell(diag, 1, 0, "", text_halign = text.align_right)
+
+    table.cell(diag, 0, 1, "Window (bars, M of N)", text_halign = text.align_left)
+    table.cell(diag, 1, 1, windowText, text_halign = text.align_right)
+
+    table.cell(diag, 0, 2, "Coverage (C of M)", text_halign = text.align_left)
+    table.cell(diag, 1, 2, coverageText, text_halign = text.align_right,
+         bgcolor = c < m ? color.new(color.orange, 70) : na)
+
+    table.cell(diag, 0, 3, "Intrabars/bar (avg)", text_halign = text.align_left)
+    table.cell(diag, 1, 3, intrabarsText, text_halign = text.align_right,
+         bgcolor = degraded ? color.new(color.orange, 70) : na)
+
+    table.cell(diag, 0, 4, "LTF used", text_halign = text.align_left)
+    table.cell(diag, 1, 4, ltfActual, text_halign = text.align_right)
+
+    table.cell(diag, 0, 5, "Reconciliation (Σ bins / Σ volume)", text_halign = text.align_left)
+    table.cell(diag, 1, 5, ratioText, text_halign = text.align_right,
+         bgcolor = (not na(ratio) and math.abs(ratio - 1.0) > 0.02) ? color.new(color.red, 70) : na)
+
+    table.cell(diag, 0, 6, "POC price", text_halign = text.align_left)
+    table.cell(diag, 1, 6, fmtPrice(pocMid), text_halign = text.align_right)
+
+    table.cell(diag, 0, 7, "POC raw volume", text_halign = text.align_left)
+    table.cell(diag, 1, 7, fmtVol(pocRawVol), text_halign = text.align_right)
+
+    table.cell(diag, 0, 8, "Status", text_halign = text.align_left)
+    table.cell(diag, 1, 8, statusText, text_halign = text.align_right,
+         bgcolor = reason != "" ? color.new(color.gray, 70) : (naIntrabars > 0 ? color.new(color.orange, 70) : na))

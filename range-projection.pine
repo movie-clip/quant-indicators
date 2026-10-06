@@ -1,0 +1,486 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © antonametov88
+//
+// Quarterly StdDev Fan — a volatility envelope drawn from the first trading
+// session's open of every calendar quarter, widening as the square root of
+// elapsed calendar time.
+//
+// WHAT THIS COMPUTES:
+// For each calendar quarter q (Jan/Apr/Jul/Oct start) the fan is centred on A(q),
+// the OPEN of the quarter's first trading session, and for k = 1 and 2 draws
+//     A * exp(+k * sigma_Q * sqrt(tau))   and   A * exp(-k * sigma_Q * sqrt(tau))
+// where tau is the CALENDAR fraction of the quarter elapsed at the bar's close
+// (min(time_close, T_{q+1}) - T_q) / (T_{q+1} - T_q), T_q = 00:00 on the quarter's
+// first day in the exchange timezone (the cap keeps a bar's band inside its own
+// quarter). The band is exact per bar (plotted series), reaches
+// +/-1 and +/-2 sigma_Q at the quarter's end, and the part from the last bar to
+// the end of quarter q+P (input "Project Quarters Ahead", default 1) is drawn as
+// a polyline sampled uniformly in sqrt(tau). There is no bars-per-quarter
+// constant and no intraday cap: the time axis is timestamps, so the script
+// follows whatever chart timeframe is selected (2026-10-05 ruling D-3).
+//     sigma_Q(q) = mean over the L most recently COMPLETED quarters q-L..q-1 of
+//                  ln(H_j / L_j)  /  sqrt(8 / pi)
+// H_j and L_j are the high and low of TradingView's own 3M bar, log units, shown
+// as a percent in the status cell. Requirements for sigma_Q (else n/a, never a
+// substitute value): L consecutive quarters, none of them the symbol's first
+// (inception, possibly partial) 3M bar, every high/low valid, a non-zero range.
+// sigma_Q is read from the 3M series on the quarter's first chart bar ITSELF (chart
+// [0], not one bar back). The one request returns the 3M bar visible on that chart
+// bar and the 3M bar before it; the script uses whichever of the two has the
+// previous quarter's id (q-1), and is n/a (code 2) if neither does. A quarter's
+// first bar only exists once every q-1 session has ended, so the q-1 value used
+// is the completed one, on every chart timeframe.
+// A "last N quarters" cutoff drops the oldest drawn fan when a new quarter starts;
+// that is a display change, not a value change.
+//
+// SOURCE:
+//   - Range constant: Feller, W. (1951), "The asymptotic distribution of the
+//     range of sums of independent random variables", Annals of Mathematical
+//     Statistics 22(3), 427-432 — expected range of a Brownian path over unit
+//     time = sqrt(8/pi) * sigma. (The range of a Brownian PATH, not of a normal
+//     sample.)
+//   - Range-based sigma: Parkinson, M. (1980), "The Extreme Value Method for
+//     Estimating the Variance of the Rate of Return", Journal of Business 53(1),
+//     61-65, first moment E[ln(H/L)] = sqrt(8/pi) * sigma. Parkinson's published
+//     estimator uses the SECOND moment; this script uses the first-moment form
+//     (a judgement, declared here).
+//   - sqrt(t) scaling of a log-normal price: textbook (e.g. Hull, Options, Futures
+//     and Other Derivatives, lognormal property of stock prices).
+//   - The FAN AS A WHOLE IS AN ORIGINAL CONSTRUCTION for this trader. No published
+//     indicator is reproduced; there is no external authority for the combination.
+//
+// ASSUMPTIONS AND KNOWN BIASES — READ BEFORE TRUSTING A BAND:
+//   - Driftless Brownian motion in log price, constant volatility across the
+//     window and the projected quarter. Real tails are fatter: the +/-1 and +/-2
+//     sigma bands will NOT contain 68.3% and 95.4% of outcomes. It is a volatility
+//     envelope, not a forecast; the centre line assumes zero drift.
+//   - H/L miss overnight extremes: sigma is biased low by roughly 1-3%
+//     (simulation, quant report: -1.4% at 5-minute monitoring). Drift biases it
+//     slightly high.
+//   - tau is calendar time, not trading time; holidays are ignored. Against a
+//     trading-time tau (sessions completed / sessions in the quarter, approximate
+//     NYSE holidays 2005-2029, quant audit 04 F2) sqrt(tau) differs by up to about
+//     0.07 in units of k*sigma, either sign (measured -0.041 to +0.074), largest on
+//     the first session after a quarter that starts on a holiday Friday. The
+//     earlier figure of about 0.034 was understated and is replaced by this one.
+//   - The anchor is the first session's open. With extended hours shown on an
+//     intraday chart it is the first pre-market print, which can differ slightly
+//     from the official daily open. On a weekly chart the start bar's own OHLC also
+//     contains prior-quarter days, but the anchor does NOT use the bar's open: it is
+//     the open of the quarter's first daily session (see WEEKLY section), so those
+//     days do not bias the anchor.
+//   - Known limitation, carried not fixed (quant audit 08 F1): after a bar longer
+//     than a day whose daily data was empty, a quarter start on the next bar shows
+//     n/a "anchor open missing" (code 6) even when a correct anchor is in that
+//     bar's own data. Visible n/a, never a wrong number. If a hole sits INSIDE a
+//     non-empty daily array (the first session missing, later ones present), the
+//     anchor is the next session's open, as on a daily chart with a missing bar.
+//   - On a 3M chart each bar is one whole quarter, so plot.style_linebr draws no
+//     historical band lines (an isolated point has no segment); only the projected
+//     polyline, the labels and the status table appear there.
+//   - Unsupported (shown as n/a, nothing computed): timeframe above 3M, and
+//     non-standard chart types (Renko, Kagi, Line Break, Point and Figure, Range,
+//     Heikin Ashi, tick charts).
+//
+// WEEKLY AND OTHER CHARTS WITH BARS LONGER THAN A DAY:
+// The quarter's first chart bar can contain prior-quarter days (a weekly bar that
+// spans the boundary). It gets the same sigma as the daily chart, because sigma is
+// selected by 3M quarter id rather than by chart bar. The anchor is the open of the
+// quarter's first DAILY session, found from daily data, not the weekly bar's open.
+// A bar draws the band of the quarter of its LAST daily session; a bar with no daily
+// data draws nothing, and if the quarter's start then cannot be located the anchor is
+// n/a ("anchor open missing") rather than the next week's open. On a live spanning
+// week the bar plots the previous quarter's fan until the first new-quarter session
+// prints, then switches once to the new fan before the bar closes.
+//
+// LOGGING: input "Log to Pine Logs" (default on; no plotted value depends on it) writes to the
+// Pine Logs panel (More menu > Pine Logs): one info entry per quarter start (quarter, date, A,
+// 3M set used, sigma_Q with its window, quarter-end levels), a separate warning for an n/a
+// quarter, one warning if no quarter start is in loaded history, and one error for an
+// unsupported chart. Repeats on live ticks are suppressed (varip guards).
+//
+// REPAINT: none by construction. The only request.security() call passes
+// lookahead_off; sigma is latched on the quarter's first bar and held for the
+// quarter; the anchor is the first daily session's open, fixed once printed; tau
+// uses the scheduled time_close, capped at T_{q+1}. History and realtime are designed
+// to latch the same sigma (the id-selected q-1 set), but that has not been observed:
+// if TradingView's lookahead_off merge differs from the documented behaviour, neither
+// set carries id q-1 and the result is n/a (code 2) rather than a wrong value.
+//
+// COMPILE CHECK (2026-10-05, run by the user in TradingView, not by an agent):
+//   Observed: the script loads and runs on a daily chart with no defect reported; on a
+//   weekly SPX chart the first version drew fans only for some quarters (the defect
+//   the id-selected latch above replaced), and after that fix the user reported "it
+//   looks fine" for weekly and daily (no per-item breakdown given); after the logging
+//   was added the user confirmed it compiles with no error and that the weekly SPX
+//   Pine Logs panel shows one info line per quarter 2021Q4..2026Q4 with no repeats
+//   on live ticks. The static pattern check (pine_check.py --strict) is clean for
+//   this file; it is not a compile.
+// NOT VERIFIED (nothing below was observed in the check above):
+//   - The latch selection (which 3M set carries id q-1, and that neither set ever
+//     misses) item by item; the user's acceptance was an overall "looks fine", so
+//     whether any quarter showed n/a "quarterly data not aligned" is not recorded.
+//   - Whether a weekly bar's time_close is the Friday session close or the next
+//     Monday 00:00 (the cap at T_{q+1} bounds either; the first weekly bar's tau
+//     differs, 0.0183 vs 0.0440 in the worked example); time_tradingday semantics on
+//     pre-market bars; that xloc.bar_time points beyond the last bar render at the
+//     expected place; that bq == f_q is false when bq is na.
+//   - Intraday charts were not reported on: whether request.security on "3M" from an
+//     intraday chart supplies history older than the chart's first loaded bar (if
+//     not, intraday shows n/a for sigma), and the anchor on a 5-minute chart.
+//   - A 3M chart, and Historical Quarters Shown above 20 (daily-data depth on weekly),
+//     were not checked.
+//   - No hand-computed ETF quarter has been compared with the status cell yet.
+//   - Realtime on a live spanning week (next: Thu 2027-04-01) has not been observed;
+//     that the fan latched live equals the fan after a reload is by design only.
+//   - Parameters chosen by judgement: lookback 8 quarters (relative error of sigma
+//     about 30%/sqrt(L), i.e. 10.5% at 8 and 15% at 4).
+//@version=6
+indicator("Quarterly StdDev Fan", shorttitle="Q-StdDev", overlay=true,
+     max_labels_count=20, max_polylines_count=20, dynamic_requests=true)
+
+// ===== CONSTANTS =====
+// Expected range of a standard Brownian motion over unit time (Feller 1951).
+float K_RANGE = math.sqrt(8.0 / math.pi)
+// Polyline segments over the projected part (error <= 1/(4*M) of k*sigma).
+int   M_SEG   = 32
+color C_LINE2 = color.new(#aaaacc, 50)
+
+// ===== INPUTS =====
+int   i_lookback = input.int(8, "Lookback Quarters", minval=4, maxval=20, group="Fan",
+     tooltip="Completed calendar quarters in the sigma window. Relative standard error of sigma is about 30%/sqrt(L): 10.5% at 8, 15% at 4.")
+int   i_project  = input.int(1, "Project Quarters Ahead", minval=1, maxval=4, group="Fan",
+     tooltip="How far the fan extends. 1 = to the end of the current quarter. Levels at P quarters are sigma * sqrt(P), not sigma; labels name the horizon when P > 1.")
+bool  i_hist     = input.bool(true, "Show Historical Fans", group="Display")
+bool  i_labels   = input.bool(true, "Show Labels", group="Display")
+int   i_maxfans  = input.int(20, "Historical Quarters Shown", minval=1, maxval=50, group="Display",
+     tooltip="Completed quarters drawn in addition to the current one. Display only; the oldest fan drops off when a new quarter starts.")
+
+color i_c1       = input.color(color.new(#00c87a, 65), "±1σ Color (green)", group="Display")
+color i_c2       = input.color(color.new(#1a2a44, 75), "±2σ Color (dark)", group="Display")
+color i_cmid     = input.color(color.new(#ffffff, 30), "Midline", group="Display")
+bool  i_log      = input.bool(true, "Log to Pine Logs", group="Display",
+     tooltip="Writes one entry per quarter start and one per n/a reason to the Pine Logs panel (More menu > Pine Logs). Does not change any plotted value.")
+
+// ===== HELPERS =====
+// Quarter id of a timestamp: 4*year + quarter index (0..3), in timezone tz.
+f_qid(int t, string tz) =>
+    4 * year(t, tz) + math.floor((month(t, tz) - 1) / 3)
+
+// 00:00 on the first day of quarter qid, exchange timezone.
+f_qstart(int qid) =>
+    timestamp(syminfo.timezone, math.floor(qid / 4), 3 * (qid % 4) + 1, 1, 0, 0, 0)
+
+f_qlabel(int qid) =>
+    str.tostring(math.floor(qid / 4)) + "Q" + str.tostring(qid % 4 + 1)
+
+// Evaluated in the 3M context (called from request.security). Returns
+// [quarter id of this 3M bar, mean ln(H/L) over the last len bars or na (na unless
+//  code 0), validity code, 0-based 3M bar index], then the same four values as they
+//  were on the previous 3M bar.
+// Codes: 0 ok; 1 fewer than len post-inception bars; 3 a quarter missing inside
+// the window; 4 invalid high/low in the window; 5 zero range.
+f_htf(int len) =>
+    float rng    = (high > 0 and low > 0 and high >= low) ? math.log(high / low) : na
+    float good   = ta.sma(na(rng) ? 0.0 : 1.0, len)
+    float mean_r = ta.sma(rng, len)
+    int   qid    = f_qid(time, syminfo.timezone)
+    int   span   = qid - qid[len - 1]
+    int   code   = 0
+    if bar_index < len
+        code := 1
+    else if na(span) or span != len - 1
+        code := 3
+    else if na(good) or good < 1.0
+        code := 4
+    else if na(mean_r) or not (mean_r > 0)
+        code := 5
+    float val    = code == 0 ? mean_r : na
+    int   qid_1  = qid[1]
+    float val_1  = val[1]
+    int   code_1 = code[1]
+    int   idx_1  = bar_index[1]
+    [qid, val, code, bar_index, qid_1, val_1, code_1, idx_1]
+
+// Price text for log lines: "n/a" when missing, never a number.
+f_px(float x) =>
+    na(x) ? "n/a" : str.tostring(x, format.mintick)
+
+f_reason(int c, int have, int len) =>
+    string s = "quarterly data unavailable"
+    if c == 1
+        s := "need " + str.tostring(len) + " completed quarters, have " + str.tostring(have)
+    else if c == 2
+        s := "quarterly data not aligned"
+    else if c == 3
+        s := "a quarter is missing inside the sigma window"
+    else if c == 4
+        s := "invalid high/low in the sigma window"
+    else if c == 5
+        s := "zero range"
+    else if c == 6
+        s := "anchor open missing"
+    s
+
+// Closed polygon between two point lists (top forward, bottom reversed).
+f_region(array<chart.point> top, array<chart.point> bot) =>
+    array<chart.point> r = array.copy(top)
+    for i = array.size(bot) - 1 to 0
+        array.push(r, array.get(bot, i))
+    r
+
+// ===== CHART SUPPORT =====
+// Standard time-based charts, timeframe <= 3M. Anything else: n/a, nothing computed.
+bool   tf_ok   = chart.is_standard and not timeframe.isticks and timeframe.in_seconds() <= timeframe.in_seconds("3M")
+bool   tf_gt1d = timeframe.in_seconds() > 86400
+// On an unsupported chart the request is pointed at the chart's own timeframe and
+// its result is never read.
+string htf_tf  = tf_ok ? "3M" : timeframe.period
+// Same text in the status cell and the log.
+string MSG_UNSUPPORTED = "n/a — unsupported chart (needs a standard time-based chart, timeframe 3M or shorter)"
+
+// ===== LOG GUARDS =====
+// varip is not rolled back between realtime ticks, so a guard set on one tick still
+// holds on the next; with plain var the same entry would repeat on every tick.
+varip int  log_key    = na
+varip bool log_nohist = false
+// Chart type and timeframe are fixed for the run, so one bar is enough.
+if i_log and barstate.isfirst and not tf_ok
+    log.error(MSG_UNSUPPORTED)
+
+// ===== QUARTERLY SIGMA DATA (3M context) =====
+[hq_qid, hq_mean, hq_code, hq_idx, hq_qid1, hq_mean1, hq_code1, hq_idx1] = request.security(syminfo.tickerid, htf_tf, f_htf(i_lookback),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// ===== QUARTER-START DETECTION =====
+// Quarter of the bar's TRADING DAY (not time("3M")): correct for overnight
+// sessions and pre-market bars.
+int  dq_chart = f_qid(time_tradingday, "UTC")
+bool start_a  = bar_index > 0 and not na(dq_chart[1]) and dq_chart != dq_chart[1]
+
+// Chart bars longer than a day can contain the boundary: find the first daily
+// session of the new quarter from daily data (no lookahead argument exists on
+// request.security_lower_tf).
+var int carry_dq = na
+var int carry_bi = na
+bool  start_b = false
+int   q_b     = na
+int   bq_b    = na
+float a_b     = na
+int   idx_b   = 0
+int   t_b     = na   // trading day of the quarter's first daily session (log text only)
+if tf_ok and tf_gt1d
+    array<int>   d_t = request.security_lower_tf(syminfo.tickerid, "1D", time_tradingday)
+    array<float> d_o = request.security_lower_tf(syminfo.tickerid, "1D", open)
+    int n_d = na(d_t) ? 0 : array.size(d_t)
+    int n_o = na(d_o) ? 0 : array.size(d_o)
+    if n_d > 0
+        int  prev  = carry_dq
+        // carry_dq must come from the immediately preceding chart bar; if that bar had
+        // no daily data the quarter's true first session may have been skipped.
+        bool stale = na(carry_bi) or carry_bi != bar_index - 1
+        for i = 0 to n_d - 1
+            int dq = f_qid(array.get(d_t, i), "UTC")
+            if not start_b and not na(prev) and dq != prev
+                start_b := true
+                q_b     := dq
+                idx_b   := i
+                t_b     := array.get(d_t, i)
+                a_b     := (i < n_o and not stale) ? array.get(d_o, i) : na
+            prev := dq
+        carry_dq := prev
+        carry_bi := bar_index
+        bq_b     := prev
+
+bool is_start = tf_ok and (tf_gt1d ? start_b : start_a)
+// Quarter the bar belongs to: its last daily session on bars longer than a day
+// (na when the daily array is empty), else the bar's own trading day.
+int  bq       = tf_gt1d ? bq_b : dq_chart
+
+// ===== PER-QUARTER STATE (fixed at the start bar, held for the quarter) =====
+var int   f_q    = na
+var float f_A    = na
+var float f_sig  = na
+var int   f_code = 0
+var int   f_have = na
+var int   f_Tq   = na
+var int   f_Tq1  = na
+
+if is_start
+    f_q    := tf_gt1d ? q_b : dq_chart
+    f_A    := tf_gt1d ? a_b : open
+    f_Tq   := f_qstart(f_q)
+    f_Tq1  := f_qstart(f_q + 1)
+    f_sig  := na
+    f_have := na
+    // Take the 3M set whose quarter id is q-1: the current set first, then the one
+    // before it (3M chart, realtime). Neither -> not aligned.
+    int   c      = 2
+    float s_mean = na
+    int   s_idx  = na
+    string sel   = "none (neither 3M set has quarter id q-1)"
+    if not na(hq_code) and hq_qid == f_q - 1
+        c      := hq_code
+        s_mean := hq_mean
+        s_idx  := hq_idx
+        sel    := "current"
+    else if not na(hq_code1) and hq_qid1 == f_q - 1
+        c      := hq_code1
+        s_mean := hq_mean1
+        s_idx  := hq_idx1
+        sel    := "lagged"
+    if c == 0 and (na(s_mean) or not (s_mean > 0))
+        c := 4
+    if c == 1
+        f_have := s_idx
+    if c == 0
+        if na(f_A)
+            c := 6
+        else
+            f_sig := s_mean / K_RANGE
+    f_code := c
+
+    // Log once per (quarter, outcome). varip guard: the start bar re-runs on every
+    // realtime tick and the entry must not repeat.
+    int key = f_q * 10 + c
+    if i_log and (na(log_key) or log_key != key)
+        log_key := key
+        string ql   = f_qlabel(f_q)
+        string at_txt = tf_gt1d ?
+             "first session " + str.format_time(t_b, "yyyy-MM-dd", "UTC") + " (chart bar " + str.format_time(time, "yyyy-MM-dd", syminfo.timezone) + ")" :
+             "start bar " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone)
+        string head = ql + " quarter start: " + at_txt + " | A " + f_px(f_A) + " | 3M set: " + sel
+        if c == 0
+            log.info(head + " | σQ " + str.tostring(f_sig * 100.0, "#.00") + "% (L=" + str.tostring(i_lookback) + ", " + f_qlabel(f_q - i_lookback) + " to " + f_qlabel(f_q - 1) + ")" +
+                 " | quarter end: +1σ " + f_px(f_A * math.exp(f_sig)) + "  -1σ " + f_px(f_A * math.exp(-f_sig)) +
+                 "  +2σ " + f_px(f_A * math.exp(2.0 * f_sig)) + "  -2σ " + f_px(f_A * math.exp(-2.0 * f_sig)))
+        else
+            log.info(head)
+            log.warning(ql + " n/a — " + f_reason(c, f_have, i_lookback))
+
+// ===== BAND AT EACH BAR =====
+bool  fan_ok  = not na(f_q) and not na(f_A) and not na(f_sig)
+int   cur_qid = f_qid(last_bar_time, syminfo.timezone)
+// A bar is drawn only inside its own quarter (bq == f_q); na otherwise.
+bool  shown   = fan_ok and bq == f_q and f_q >= cur_qid - (i_hist ? i_maxfans : 0)
+// time_close at or past T_{q+1} is a timestamp convention, not elapsed time.
+float tau_b   = shown ? math.max((math.min(time_close, f_Tq1) - f_Tq) / (f_Tq1 - f_Tq), 0.0) : na
+float w_b     = shown ? f_sig * math.sqrt(tau_b) : na
+
+float u1 = f_A * math.exp(w_b)
+float d1 = f_A * math.exp(-w_b)
+float u2 = f_A * math.exp(2.0 * w_b)
+float d2 = f_A * math.exp(-2.0 * w_b)
+float m0 = shown ? f_A : na
+
+// Alternate quarters go to alternate series so plot.style_linebr never joins the
+// last bar of one quarter to the first bar of the next.
+bool pa = shown and f_q % 2 == 0
+bool pb = shown and f_q % 2 != 0
+
+// ===== PLOTS =====
+p_u2a = plot(pa ? u2 : na, "+2σ (even quarters)", color=C_LINE2, style=plot.style_linebr)
+p_u1a = plot(pa ? u1 : na, "+1σ (even quarters)", color=color.new(i_c1, 10), style=plot.style_linebr)
+p_m0a = plot(pa ? m0 : na, "Centre (even quarters)", color=i_cmid, style=plot.style_linebr)
+p_d1a = plot(pa ? d1 : na, "-1σ (even quarters)", color=color.new(i_c1, 10), style=plot.style_linebr)
+p_d2a = plot(pa ? d2 : na, "-2σ (even quarters)", color=C_LINE2, style=plot.style_linebr)
+fill(p_u2a, p_u1a, color=i_c2, title="+2σ to +1σ (even)")
+fill(p_u1a, p_d1a, color=i_c1, title="±1σ (even)")
+fill(p_d1a, p_d2a, color=i_c2, title="-1σ to -2σ (even)")
+
+p_u2b = plot(pb ? u2 : na, "+2σ (odd quarters)", color=C_LINE2, style=plot.style_linebr)
+p_u1b = plot(pb ? u1 : na, "+1σ (odd quarters)", color=color.new(i_c1, 10), style=plot.style_linebr)
+p_m0b = plot(pb ? m0 : na, "Centre (odd quarters)", color=i_cmid, style=plot.style_linebr)
+p_d1b = plot(pb ? d1 : na, "-1σ (odd quarters)", color=color.new(i_c1, 10), style=plot.style_linebr)
+p_d2b = plot(pb ? d2 : na, "-2σ (odd quarters)", color=C_LINE2, style=plot.style_linebr)
+fill(p_u2b, p_u1b, color=i_c2, title="+2σ to +1σ (odd)")
+fill(p_u1b, p_d1b, color=i_c1, title="±1σ (odd)")
+fill(p_d1b, p_d2b, color=i_c2, title="-1σ to -2σ (odd)")
+
+// ===== FUTURE PART, LABELS, STATUS (last bar only) =====
+var array<polyline> fut_poly = array.new<polyline>()
+var array<label>    fut_lbl  = array.new<label>()
+var table           tbl      = table.new(position.top_right, 1, 1, border_width=1)
+
+if barstate.islast
+    // Delete-then-create: the geometry is identical on every tick.
+    while array.size(fut_poly) > 0
+        polyline.delete(array.pop(fut_poly))
+    while array.size(fut_lbl) > 0
+        label.delete(array.pop(fut_lbl))
+
+    float p_f = float(i_project)
+
+    if fan_ok and tau_b < p_f
+        // Calendar starts of quarters q .. q+P.
+        array<int> tq = array.new<int>()
+        for n = 0 to i_project
+            array.push(tq, f_qstart(f_q + n))
+
+        float s0 = math.sqrt(tau_b)
+        float s1 = math.sqrt(p_f)
+        array<chart.point> pu2 = array.new<chart.point>()
+        array<chart.point> pu1 = array.new<chart.point>()
+        array<chart.point> pm0 = array.new<chart.point>()
+        array<chart.point> pd1 = array.new<chart.point>()
+        array<chart.point> pd2 = array.new<chart.point>()
+        // Uniform in sqrt(tau); tau is piecewise-linear calendar time with each
+        // quarter worth 1, so the end lands exactly on the start of quarter q+P.
+        for j = 0 to M_SEG
+            float s  = j == M_SEG ? s1 : s0 + (s1 - s0) * j / M_SEG
+            float tj = s * s
+            int   nn = math.min(math.floor(tj), i_project - 1)
+            int   tx = array.get(tq, nn) + math.round((tj - nn) * (array.get(tq, nn + 1) - array.get(tq, nn)))
+            float wj = f_sig * s
+            array.push(pu2, chart.point.from_time(tx, f_A * math.exp(2.0 * wj)))
+            array.push(pu1, chart.point.from_time(tx, f_A * math.exp(wj)))
+            array.push(pm0, chart.point.from_time(tx, f_A))
+            array.push(pd1, chart.point.from_time(tx, f_A * math.exp(-wj)))
+            array.push(pd2, chart.point.from_time(tx, f_A * math.exp(-2.0 * wj)))
+
+        // Fills first, lines on top.
+        array.push(fut_poly, polyline.new(f_region(pu2, pu1), closed=true, xloc=xloc.bar_time, line_color=color(na), fill_color=i_c2))
+        array.push(fut_poly, polyline.new(f_region(pu1, pd1), closed=true, xloc=xloc.bar_time, line_color=color(na), fill_color=i_c1))
+        array.push(fut_poly, polyline.new(f_region(pd1, pd2), closed=true, xloc=xloc.bar_time, line_color=color(na), fill_color=i_c2))
+        array.push(fut_poly, polyline.new(pu2, xloc=xloc.bar_time, line_color=C_LINE2, line_width=1))
+        array.push(fut_poly, polyline.new(pu1, xloc=xloc.bar_time, line_color=color.new(i_c1, 10), line_width=1))
+        array.push(fut_poly, polyline.new(pm0, xloc=xloc.bar_time, line_color=i_cmid, line_width=1, line_style=line.style_dashed))
+        array.push(fut_poly, polyline.new(pd1, xloc=xloc.bar_time, line_color=color.new(i_c1, 10), line_width=1))
+        array.push(fut_poly, polyline.new(pd2, xloc=xloc.bar_time, line_color=C_LINE2, line_width=1))
+
+        if i_labels
+            string hz = i_project > 1 ? " @" + str.tostring(i_project) + "Q" : ""
+            int    xe = array.get(tq, i_project)
+            float  we = f_sig * s1
+            float  e_u2 = f_A * math.exp(2.0 * we)
+            float  e_u1 = f_A * math.exp(we)
+            float  e_d1 = f_A * math.exp(-we)
+            float  e_d2 = f_A * math.exp(-2.0 * we)
+            array.push(fut_lbl, label.new(x=xe, y=e_u2, text="+2σ" + hz + " " + str.tostring(e_u2, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(i_c2, 10), textcolor=color.white, size=size.small))
+            array.push(fut_lbl, label.new(x=xe, y=e_u1, text="+1σ" + hz + " " + str.tostring(e_u1, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(i_c1, 10), textcolor=color.white, size=size.small))
+            array.push(fut_lbl, label.new(x=xe, y=e_d1, text="-1σ" + hz + " " + str.tostring(e_d1, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(i_c1, 10), textcolor=color.white, size=size.small))
+            array.push(fut_lbl, label.new(x=xe, y=e_d2, text="-2σ" + hz + " " + str.tostring(e_d2, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(i_c2, 10), textcolor=color.white, size=size.small))
+
+    // Status cell: always present; "n/a — reason" on every unavailable case.
+    string st    = ""
+    color  st_bg = color.new(color.gray, 70)
+    if not tf_ok
+        st := MSG_UNSUPPORTED
+    else if na(f_q)
+        st := "n/a — quarter start not in loaded history"
+    else if f_code != 0
+        st := "n/a — " + f_reason(f_code, f_have, i_lookback)
+    else
+        string win = f_qlabel(f_q - i_lookback) + " to " + f_qlabel(f_q - 1)
+        float  qe  = f_sig
+        st := "σQ " + str.tostring(f_sig * 100.0, "#.00") + "%  (L=" + str.tostring(i_lookback) + ", " + win + ")\n" +
+             "A " + str.tostring(f_A, format.mintick) + "  (open of first session of " + f_qlabel(f_q) + ")\n" +
+             "quarter end: +1σ " + str.tostring(f_A * math.exp(qe), format.mintick) + "  -1σ " + str.tostring(f_A * math.exp(-qe), format.mintick) + "\n" +
+             "             +2σ " + str.tostring(f_A * math.exp(2.0 * qe), format.mintick) + "  -2σ " + str.tostring(f_A * math.exp(-2.0 * qe), format.mintick)
+        st_bg := color.new(color.black, 40)
+    table.cell(tbl, 0, 0, st, text_color=color.white, bgcolor=st_bg, text_halign=text.align_left, text_size=size.small)
+
+    // No quarter start in loaded history: logged once (varip guard; this block runs on every tick).
+    if i_log and tf_ok and na(f_q) and not log_nohist
+        log_nohist := true
+        log.warning("n/a — quarter start not in loaded history")

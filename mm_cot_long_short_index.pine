@@ -3,63 +3,142 @@
 //
 // MM COT Long/Short Index — Managed Money positioning, CFTC Disaggregated COT report.
 //
-// IMPORTANT — VERIFY THE SYMBOLS BEFORE TRUSTING THIS:
-// TradingView's exact ticker for "Managed Money Positions - Long/Short" was reconstructed
-// from search results, not confirmed by opening the live TradingView symbol page (my usual
-// double-check tools were unavailable when this was written). The defaults below
-// (COT2:088691_F_MMP_L_OLD / _S_OLD) are my best reconstruction for Gold. To confirm or
-// fix them yourself: click the symbol inputs below in this indicator's settings, type
-// "088691" (Gold's CFTC code) into the symbol search, and look through the COT2-prefixed
-// results for "Managed Money Positions - Long" and "... - Short" — pick those exact
-// entries. If a symbol input shows "n/a" in the table, that symbol didn't resolve.
+// SYMBOLS — CONFIRMED, GUARDRAIL 3 SATISFIED:
+// TradingView's exact tickers for Gold's "Managed Money Positions - Long/Short"
+// (CFTC code 088691) are CONFIRMED as of 2026-09-17, via TradingView's own live symbol
+// search, and separately by pasting both bare strings into the Pine editor with zero
+// compile/runtime errors. The defaults below (088691_F_MMP_L / 088691_F_MMP_S) are BARE
+// tickers: no exchange prefix (neither COT2: nor COT: is valid here — TradingView resolves
+// these symbols unprefixed) and no _ALL/_OLD/_OTHER suffix. The aggregate "All Managed
+// Money" category IS the bare ticker; only the OLD/OTHER crop-year sub-breakouts take an
+// explicit suffix, and Gold has no crop year, so neither suffix applies. ("(All)" appearing
+// in TradingView's search-result description is descriptive prose, not part of the ticker.)
+// If a symbol input shows "n/a" in the table, that symbol didn't resolve — re-check it via
+// the symbol search in this indicator's settings.
 //
 // For a different commodity/future, look up its CFTC code (visible on the CFTC COT report
-// itself, or via a site like tradingster.com/cot) and search for that code instead.
+// itself, or via a site like tradingster.com/cot) and search for that bare code instead —
+// do not add COT2:/COT: or an _ALL/_OLD/_OTHER suffix unless TradingView's own search shows
+// one for that specific series.
 //
 // WHAT THIS COMPUTES:
-// The "Long/Short Index" isn't the raw position size — it's where the CURRENT position
-// sits relative to its own recent range (a rolling min/max), rescaled to -100..+100.
-// +100 = Managed Money is at the top of its recent range for that side (long or short).
-// -100 = Managed Money is at the bottom of its recent range for that side.
-// This is standard "COT Index" methodology (a stochastic-style oscillator on positioning),
-// popularized by several COT analysts — it's what lets you compare a market with 50,000
-// contracts of MM longs to one with 500,000, on the same -100..100 scale.
+// The NET COT Index. net = Managed Money gross longs - gross shorts (positive = net long).
+// The index is not the position size — it is where the current net position sits inside its
+// own range over the last N weekly COT reports, rescaled to 0..100:
+//   100 = the most net long Managed Money has been in the window
+//    50 = the middle of the window's range
+//     0 = the most net short it has been in the window
+// 80 and 20 are the conventional "crowded" extremes. This describes POSITIONING, not a
+// trade — the contrarian reading of a crowded extreme is the reader's call, not the
+// script's. Gross long and gross short are shown as raw table rows only; they are NOT
+// indexed separately, because both sides expand together with open interest and can print
+// simultaneous "extremes" while net positioning is flat.
+//
+// SOURCE:
+// The COT Index — a stochastic rescale of a trader category's NET position over a rolling
+// window onto 0..100, with 80/20 as the conventional extremes — as defined in:
+//   Stephen Briese, "The Commitments of Traders Bible", Wiley, 2008.
+//   Larry Williams, "Trade Stocks & Commodities with the Insiders: Secrets of the COT
+//     Report", Wiley, 2005.
+// (Book-level citation only: I have not opened either volume to cite a chapter.)
+//
+// WHERE THIS DEPARTS FROM THE SOURCE:
+// - Both authors work mainly from the LEGACY report's Commercial and Large Speculator
+//   categories. This applies the same index to MANAGED MONEY from the DISAGGREGATED
+//   report — the closest modern analogue of the large-speculator bucket, but not the same
+//   series, and the published 80/20 thresholds were not calibrated on it.
+// - 156 weeks (3 years) is a convention choice, not a derived number. 26, 52 and 260 are
+//   all in common use.
+//
+// WHAT DEGRADES, AND HOW YOU SEE IT:
+// - The window counts WEEKLY COT REPORTS, not chart bars, so it means the same thing on
+//   every chart timeframe AT OR BELOW "W" (weekly). It is built from the weekly reports
+//   visible in the chart's loaded history, so on a very low timeframe (1m/5m) the chart
+//   never loads enough weeks and the index stays "n/a" — the table's "Window" row shows
+//   how many it has. ABOVE a weekly chart timeframe (e.g. monthly), request.security
+//   delivers one value per CHART bar rather than per weekly report, so the window would
+//   silently mix multiple weeks into one observation; instead the index and window rows
+//   both read "n/a (chart TF > W)" so the degraded state is visible rather than a
+//   plausible-looking wrong number.
+// - The index is "n/a", never a number, when: a symbol doesn't resolve; the two legs report
+//   different weeks; fewer than N reports have been collected; the net position was
+//   constant across the whole window (no range to rank against); or the chart timeframe is
+//   above weekly (see above).
+// - The current (still-open) week's reading is PROVISIONAL: by design, the in-progress
+//   week is not added to the window until its bar confirms, so the live bar ranks against
+//   lookbackWeeks + 1 observations and can move again before that bar closes. This does not
+//   change any already-closed bar's plotted value.
+// - The table shows the date of the weekly series bar the reading came from, and marks it
+//   STALE past the configured age. The age is measured from that bar's OPEN time, which is
+//   the weekly series' CURRENT week on a weekly chart but the last CLOSED week on a
+//   sub-weekly chart — so the same missing report is flagged STALE about a week later on a
+//   weekly chart than on a daily one. Whether the underlying date itself is CFTC's Tuesday
+//   as-of date or the Friday release date is NOT verified.
 
 //@version=6
 indicator("MM COT Long/Short Index", overlay=false)
 
 // ============================= INPUTS =============================
-mmLongSymbol  = input.symbol("COT2:088691_F_MMP_L_OLD", title="Managed Money LONG position symbol",  group="Data Source")
-mmShortSymbol = input.symbol("COT2:088691_F_MMP_S_OLD", title="Managed Money SHORT position symbol", group="Data Source")
+mmLongSymbol  = input.symbol("088691_F_MMP_L", title="Managed Money LONG position symbol",  group="Data Source")
+mmShortSymbol = input.symbol("088691_F_MMP_S", title="Managed Money SHORT position symbol", group="Data Source")
 
-lookbackWeeks = input.int(156, title="Index Lookback (weeks)", group="Calculation",
-     tooltip="Rolling window the current position is ranked against. COT is published weekly, so this is requested on a fixed weekly timeframe regardless of your chart's timeframe. 156 ≈ 3 years, a common convention; some analysts use 52 (1yr) or 260 (5yr).")
+staleAfterDays = input.int(21, title="Flag data stale after (days)", minval=8, group="Data Source",
+     tooltip="CFTC compiles positions as of Tuesday close and publishes the following Friday 15:30 ET, so the newest closed weekly bar is normally at most about 13 days behind wall clock. 21 days absorbs that ordinary lag plus one holiday-delayed release before the reading is flagged STALE.")
+
+lookbackWeeks = input.int(156, title="Index Lookback (weeks)", minval=2, group="Calculation",
+     tooltip="Rolling window of COT reports (one per week) the current net position is ranked against. This counts weekly reports, not chart bars, so it means the same window on every chart timeframe AT OR BELOW \"W\" (weekly). Above a weekly chart timeframe (e.g. monthly), request.security(sym, \"W\", ...) returns one value per CHART bar rather than per weekly report, so the index reads n/a instead of silently mixing multiple weeks into one observation. 156 ≈ 3 years, a common convention; some analysts use 26 (6mo), 52 (1yr) or 260 (5yr). The index reads n/a until this many weekly reports have been collected from the chart's loaded history.")
 
 // ============================= DATA (COT is weekly — pin to W regardless of chart TF) =============================
-mmLongPos  = request.security(mmLongSymbol,  "W", close, ignore_invalid_symbol = true)
-mmShortPos = request.security(mmShortSymbol, "W", close, ignore_invalid_symbol = true)
+[mmLongPos,  asOfLong]  = request.security(mmLongSymbol,  "W", [close, time],
+     lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+[mmShortPos, asOfShort] = request.security(mmShortSymbol, "W", [close, time],
+     lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
 
-// ============================= INDEX CALCULATION =============================
-longMin = ta.lowest(mmLongPos, lookbackWeeks)
-longMax = ta.highest(mmLongPos, lookbackWeeks)
-longIndex = na(mmLongPos) or (longMax == longMin) ? na : (mmLongPos - longMin) / (longMax - longMin) * 200 - 100
+// ============================= ALIGNMENT AND NET =============================
+legsAligned = not na(asOfLong) and not na(asOfShort) and asOfLong == asOfShort
+asOfTime    = legsAligned ? asOfLong : na
+net         = (na(mmLongPos) or na(mmShortPos) or not legsAligned) ? na : mmLongPos - mmShortPos
 
-shortMin = ta.lowest(mmShortPos, lookbackWeeks)
-shortMax = ta.highest(mmShortPos, lookbackWeeks)
-shortIndex = na(mmShortPos) or (shortMax == shortMin) ? na : (mmShortPos - shortMin) / (shortMax - shortMin) * 200 - 100
+// ============================= WEEKLY WINDOW (invariant for chart TF <= "W"; na above it — CR-1) =============================
+tfTooCoarse = timeframe.in_seconds() > timeframe.in_seconds("W")
+
+var float[] netHist = array.new_float()
+
+newWeekly = not na(asOfTime) and (na(asOfTime[1]) or asOfTime != asOfTime[1])
+
+if newWeekly and barstate.isconfirmed and not na(net) and not tfTooCoarse
+    array.push(netHist, net)
+    if array.size(netHist) > lookbackWeeks
+        array.shift(netHist)
+
+// ============================= RANGE, INCLUDING THE CURRENT OBSERVATION =============================
+histReady = array.size(netHist) >= lookbackWeeks
+netLo = (histReady and not na(net)) ? math.min(array.min(netHist), net) : na
+netHi = (histReady and not na(net)) ? math.max(array.max(netHist), net) : na
+
+// ============================= INDEX =============================
+cotIndex = (tfTooCoarse or na(net) or not histReady or netHi == netLo) ? na : 100.0 * (net - netLo) / (netHi - netLo)
+
+// ============================= STALENESS =============================
+stale = not na(asOfTime) and (timenow - asOfTime) > staleAfterDays * 86400000
 
 // ============================= PLOTS =============================
-plot(longIndex,  title="MM Long Index",  color=color.new(color.green, 0), linewidth=2)
-plot(shortIndex, title="MM Short Index", color=color.new(color.red, 0),   linewidth=2)
-hline(0,    "Midpoint",   color=color.gray, linestyle=hline.style_dotted)
-hline(80,   "Long Extreme (crowded)",  color=color.new(color.green, 60), linestyle=hline.style_dashed)
-hline(-80,  "Short Extreme (crowded)", color=color.new(color.red, 60),   linestyle=hline.style_dashed)
+plot(cotIndex, title = "MM Net COT Index", color = color.new(color.blue, 0), linewidth = 2)
+hline(80, "Crowded long (80)",  color = color.new(color.green, 60), linestyle = hline.style_dashed)
+hline(50, "Midpoint (50)",      color = color.gray,                 linestyle = hline.style_dotted)
+hline(20, "Crowded short (20)", color = color.new(color.red, 60),   linestyle = hline.style_dashed)
 
 // ============================= TABLE (current readings + raw positions) =============================
-var table dash = table.new(position.top_right, 2, 4, border_width = 1)
+var table dash = table.new(position.top_right, 2, 6, border_width = 1)
 
 fmt(x)   => na(x) ? "n/a" : str.tostring(x, "#.#")
 fmtPos(x) => na(x) ? "n/a" : str.tostring(x, "#,###")
+
+legsMisaligned = not na(mmLongPos) and not na(mmShortPos) and not legsAligned
+asOfText = na(asOfTime) ? (legsMisaligned ? "n/a (legs misaligned)" : "n/a") : str.format_time(asOfTime, "yyyy-MM-dd", "GMT") + (stale ? " — STALE" : "")
+
+indexText  = tfTooCoarse ? "n/a (chart TF > W)" : fmt(cotIndex)
+windowText = tfTooCoarse ? "n/a (chart TF > W)" : str.tostring(array.size(netHist)) + "/" + str.tostring(lookbackWeeks) + " weeks"
 
 if barstate.islast
     table.cell(dash, 0, 0, "MM Long Position",  text_halign = text.align_left)
@@ -68,10 +147,17 @@ if barstate.islast
     table.cell(dash, 0, 1, "MM Short Position",  text_halign = text.align_left)
     table.cell(dash, 1, 1, fmtPos(mmShortPos),   text_halign = text.align_right)
 
-    table.cell(dash, 0, 2, "Long Index",  text_halign = text.align_left)
-    table.cell(dash, 1, 2, fmt(longIndex), text_halign = text.align_right,
-         bgcolor = na(longIndex) ? na : color.new(color.green, 70), text_color = color.white)
+    table.cell(dash, 0, 2, "MM Net Position",  text_halign = text.align_left)
+    table.cell(dash, 1, 2, fmtPos(net),         text_halign = text.align_right)
 
-    table.cell(dash, 0, 3, "Short Index", text_halign = text.align_left)
-    table.cell(dash, 1, 3, fmt(shortIndex), text_halign = text.align_right,
-         bgcolor = na(shortIndex) ? na : color.new(color.red, 70), text_color = color.white)
+    table.cell(dash, 0, 3, "Net COT Index (0-100)", text_halign = text.align_left)
+    table.cell(dash, 1, 3, indexText, text_halign = text.align_right,
+         bgcolor = na(cotIndex) ? na : (cotIndex >= 80 ? color.new(color.green, 70) : cotIndex <= 20 ? color.new(color.red, 70) : na),
+         text_color = na(cotIndex) ? na : (cotIndex >= 80 or cotIndex <= 20 ? color.white : na))
+
+    table.cell(dash, 0, 4, "Window", text_halign = text.align_left)
+    table.cell(dash, 1, 4, windowText, text_halign = text.align_right)
+
+    table.cell(dash, 0, 5, "Data as of (series bar)", text_halign = text.align_left)
+    table.cell(dash, 1, 5, asOfText, text_halign = text.align_right,
+         bgcolor = stale ? color.new(color.orange, 70) : na)

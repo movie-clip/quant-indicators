@@ -16,28 +16,34 @@ What's actually on disk today:
 ```
 tradingview/
   mm_cot_long_short_index.pine
+  range-projection.pine
   strategy13_trend_carry.pine
   systemic_stress_dashboard.pine
+  volume_profile.pine
   Trend_+_Carry,_Risk-Regime_Sized_(Strategy_13)_AMEX_VTI_2026-08-24_55c9e.csv
+  docs/
+    mm-cot-long-short-index.md
+    range-projection.md
+    volume-profile.md
+    testing-methodology.md   the verification method, not a per-script doc
   .agentic.json           binds this repo to the agent network
 ```
 
-Three scripts, one Strategy Tester export, flat at the repo root — no
-subdirectories exist yet. Flat is on purpose: there are a handful of scripts
-and each is independent, so a directory tree would be structure with nothing
-to hold.
+Five scripts, flat at the repo root. Flat is on purpose: there are a handful of
+scripts and each is independent, so a directory tree would be structure with
+nothing to hold.
+
+**Script docs live at `docs/<slug>.md`, where the doc slug is the script's
+filename with underscores turned into hyphens** — `volume_profile.pine` →
+`docs/volume-profile.md`. `range-projection.pine` is documented at
+`docs/range-projection.md` (its doc slug is already hyphenated). Three scripts
+have one; `strategy13_trend_carry` and `systemic_stress_dashboard` do not yet.
 
 The `.csv` above is a Strategy Tester trade-list export for
-`strategy13_trend_carry.pine`, kept loose at the root as evidence rather than
-filed anywhere — there is no `fixtures/` directory yet.
-
-**`docs/<slug>.md` and `fixtures/*.csv` are the convention for new script
-documentation and new backtest evidence, not something that exists yet.** No
-script currently has a `docs/<slug>.md`, and no `fixtures/` directory exists —
-the one CSV above is the only backtest evidence in the repo, and it sits at
-the root rather than under `fixtures/`. When either gets created for the first
-time, it should land at `docs/<slug>.md` / `fixtures/*.csv` as named, matching
-`project.md`'s delivery model and the script header contract.
+`strategy13_trend_carry.pine`, kept loose at the root under TradingView's own
+export name — there is no `fixtures/` directory yet. `fixtures/<slug>-*.csv` is
+the convention for new backtest evidence; when the first one is filed it lands
+there.
 
 ## Stack
 
@@ -57,7 +63,7 @@ about how work is verified here — see "Commands" below.
 | Static check one script | `python ../.agentic/scripts/pine_check.py <file>.pine` |
 | Static check, blocking on advisories | `python ../.agentic/scripts/pine_check.py <file>.pine --strict` |
 | Static check everything | `python ../.agentic/scripts/pine_check.py *.pine` |
-| Pin the checker itself | `python -m pytest ../.agentic/scripts/test_pine_check.py -q` |
+| Pin the checker itself | `python ../.agentic/scripts/test_pine_check.py` |
 
 `pine_check.py` is a pattern checker, not a compiler. It catches version
 mismatches, repaint patterns, missing strategy costs, unbalanced parens and
@@ -85,10 +91,11 @@ that a `REFUSED` cites.
 
 ## Working on a script
 
-Read the script's header comment first. The existing three carry, in the header,
-exactly what a reader needs to distrust them correctly — `mm_cot_long_short_index.pine`
-says outright that its CFTC tickers were reconstructed from search results and
-not confirmed, and `systemic_stress_dashboard.pine` says it is an original
-approximation rather than a reproduction of any published indicator. **That
+Read the script's header comment first. Each carries, in the header, exactly
+what a reader needs to distrust it correctly — `systemic_stress_dashboard.pine`
+and `volume_profile.pine` say they are original constructions rather than
+reproductions of any published indicator, and `mm_cot_long_short_index.pine`
+replaced its "tickers reconstructed, not confirmed" warning with the date and
+method by which they were confirmed. **That
 convention is the repo's most valuable habit.** Preserve it: when you cannot
 verify something, say so in the header rather than quietly shipping it.
