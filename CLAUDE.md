@@ -77,7 +77,7 @@ equivalent of a test suite here, and like a test suite it is not optional.
 ## The six guardrails
 
 Stated here so a session working this repo outside the agent network still sees
-them. `../.agentic/projects/tradingview/project.md` carries the numbered copy
+them. `agentic/project.md` carries the numbered copy
 that a `REFUSED` cites.
 
 - **No repainting.** A signal that moves after its bar closed is not a signal.

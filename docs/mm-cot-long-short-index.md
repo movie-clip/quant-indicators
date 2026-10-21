@@ -23,7 +23,7 @@ fix, not a defect.
 **The TradingView compile check ran on 2026-09-17 and PASSED.** The script
 compiles, starts with zero console errors, and computed a live reading of
 65.80 in the test session. See § Still open after this run and
-`../.agentic/projects/tradingview/runs/2026-09-17-fix-mm-cot-long-short-index/compile.md`
+`compile.md` of run `2026-09-17-fix-mm-cot-long-short-index` (pruned; in `.agentic` git history)
 for the full record.
 
 **Both gates this run judged have PASSED, on 2026-09-17.** The quant-audit
@@ -61,7 +61,7 @@ a live reading — the chart legend showed `MM COT Long/Short Index  65.80`,
 a real, non-`n/a`, non-error value — with the final bare symbol defaults.
 Confirmed twice, including once after re-selecting both symbols through
 TradingView's own "Change symbol" picker. Full method and result:
-`../.agentic/projects/tradingview/runs/2026-09-17-fix-mm-cot-long-short-index/compile.md`.
+`compile.md` of run `2026-09-17-fix-mm-cot-long-short-index` (pruned; in `.agentic` git history).
 
 **What the PASS does not confirm** — from `compile.md` § What this does NOT
 confirm, and not to be over-read as "every code path proven":
@@ -309,10 +309,10 @@ is an `indicator()`, not a `strategy()`, and this run created no fixture.
 Independent worked examples exist as hand computations, not executed tests
 (there is no Pine test runner in this project):
 
-- `../.agentic/projects/tradingview/runs/2026-09-17-fix-mm-cot-long-short-index/01-quant.md`
+- `01-quant.md` of run `2026-09-17-fix-mm-cot-long-short-index` (pruned; in `.agentic` git history)
   § Worked examples — two series (5-week and 12-week) hand-traced against the
   formula, including the degenerate `hi == lo` case.
-- `../.agentic/projects/tradingview/runs/2026-09-17-fix-mm-cot-long-short-index/03-test.md`
+- `03-test.md` of run `2026-09-17-fix-mm-cot-long-short-index` (pruned; in `.agentic` git history)
   § Worked example — an independently constructed 12-week, `lookbackWeeks = 4`
   series exercising window-not-full, first-full-bar, a legs-misaligned bar, a
   symbol-unresolved bar, a constant-net `hi == lo` stretch, and recovery, with
