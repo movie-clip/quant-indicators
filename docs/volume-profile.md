@@ -41,7 +41,7 @@ nodes (prices passed through quickly, which price tends to traverse fast
 again), not entry/exit timing itself.
 
 Source: `02-quant.md` § Concept and § Formula
-(`C:\projects\investments\.agentic\projects\tradingview\runs\2026-09-18-vertical-volume-indicator\02-quant.md`).
+(run `2026-09-18-vertical-volume-indicator`, in `.agentic` git history).
 
 ## 2. Inputs
 
@@ -101,8 +101,8 @@ not "the profile is broken". **A low ratio is only cause to distrust the
 that combination, intrabars are being dropped, double-counted, or the
 close/volume arrays are misaligned, and every bin is suspect, not just the
 skipped one. Source: `06-backend.md` § changed and `07-quant-audit.md`
-Finding 6 (both at
-`C:\projects\investments\.agentic\projects\tradingview\runs\2026-09-18-vertical-volume-indicator\`),
+Finding 6 (both in run
+`2026-09-18-vertical-volume-indicator`, in `.agentic` git history),
 which is also what this run's fix to the script header's Reconciliation
 bullet now says.
 
@@ -205,5 +205,5 @@ belongs to `strategy13_trend_carry.pine`, not this script. The nearest
 equivalent evidence for this indicator is 02-quant.md's hand-computed worked
 example (3 bars, 4 intrabars each, `B = 4`, `R_lo = 10.00`, `R_hi = 12.50`),
 independently re-derived against the shipped code in 04-quant-audit.md § 1
-and again, with a partial-`na` mutation, in 07-quant-audit.md § 1 — both at
-`C:\projects\investments\.agentic\projects\tradingview\runs\2026-09-18-vertical-volume-indicator\`.
+and again, with a partial-`na` mutation, in 07-quant-audit.md § 1 — both in run
+`2026-09-18-vertical-volume-indicator`, in `.agentic` git history.

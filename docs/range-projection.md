@@ -4,9 +4,8 @@ Script: `range-projection.pine` (indicator title "Quarterly StdDev Fan", short
 title `Q-StdDev`). Indicator, not a strategy — no fixture, no Strategy Tester
 export (see § 6).
 
-Run evidence lives at
-`C:\projects\investments\.agentic\projects\tradingview\runs\2026-10-05-range-projection-quarter-anchor\`
-(`02-quant.md`, `06-quant.md`, `04-`/`08-quant-audit.md`, `compile.md`,
+Run evidence is run `2026-10-05-range-projection-quarter-anchor`, in
+`.agentic` git history (`02-quant.md`, `06-quant.md`, `04-`/`08-quant-audit.md`, `compile.md`,
 `decisions.md`); file names below refer to that directory.
 
 ## 1. What it computes
