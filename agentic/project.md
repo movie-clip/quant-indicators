@@ -106,12 +106,12 @@ this section exists to prevent.
 
 | Lane | Agent | Pack | Owns |
 |---|---|---|---|
-| recon | `scout` | — | read-only exploration: which script does this, what does it already compute |
+| recon | `scout`; `reviewer` (CHECK) | — | read-only exploration: which script does this, what does it already compute |
 | product | `producer` | `product.md` | which scripts exist, which are wanted, what is already covered, and where "no" lives |
 | quant | `quantitative-researcher` (RESEARCH) | `quant.md` | the formula, its source, its parameters and its failure modes, before code |
-| story | `story-author` | — | drafts a ticketed story on the rare slice that needs one |
+| story | `producer` (STORY) | — | drafts a ticketed story on the rare slice that needs one |
 | design | `tech-lead` (DESIGN) | — | the input/plot/alert signature, and the split when more than one script moves |
-| backend | `backend-engineer` | `backend.md` | **the `.pine` source.** Every script file in the repo |
+| backend | `engineer` | `backend.md` | **the `.pine` source.** Every script file in the repo |
 | test | `test-engineer` | `testing.md` | `fixtures/**`, and the evidence a change did what it claimed |
 | docs | `docs-engineer` | `docs.md` | `docs/**`, script header blocks, and at close-out applying `pack-corrections.md` |
 | quant-audit | `quantitative-researcher` (AUDIT) | `quant.md` | **mathematics gate.** Independently re-derives the computed values |

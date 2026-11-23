@@ -1,6 +1,6 @@
 # Capability pack: backend — project `tradingview`
 
-For the `backend-engineer` lane. Here that means **the `.pine` source** — the
+For the `backend` lane (`engineer`). Here that means **the `.pine` source** — the
 whole artifact, inputs and plots and tables included. Where this contradicts
 general programming instincts, this file wins; Pine is not the language your
 instincts were trained on.

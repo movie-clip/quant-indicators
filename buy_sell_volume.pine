@@ -1,0 +1,466 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © antonametov88
+//
+// Buy/Sell Volume (intrabar estimate) — one column pair per chart bar in its own
+// pane: estimated BUY volume above the zero line, estimated SELL volume below it.
+// The bar is whatever the chart timeframe is: on D each column pair is one day's
+// volume, on W one week's. Written alongside volume_profile.pine, which is
+// unchanged: that script answers "at which PRICES did volume trade", this one
+// "how did each bar's volume split between up-moves and down-moves".
+//
+// WHAT THIS COMPUTES:
+// For every chart bar, the lower-timeframe intrabars inside it are fetched with
+// request.security_lower_tf() and each intrabar's ENTIRE volume is assigned to one
+// side by the direction of that intrabar:
+//     1. close > open            -> buy
+//     2. close < open            -> sell
+//     3. close == open: close > previous intrabar's close -> buy,
+//                       close < previous intrabar's close -> sell
+//     4. still equal             -> same side as the previous classified intrabar
+//     5. no previous side exists -> unclassified (counted, never assigned)
+// "Previous" carries across chart bars (the first intrabar of a day is compared
+// with the last intrabar of the day before).
+//     buy(bar)   = sum of volume of intrabars classified buy      (plotted  > 0)
+//     sell(bar)  = sum of volume of intrabars classified sell     (plotted  < 0)
+//     delta(bar) = buy - sell                                (Data Window only)
+// Column height is raw volume in the symbol's own units, so bars are comparable
+// with each other and with the chart's volume, on the same symbol and timeframe.
+//
+// SMOOTHED DELTA LINE (input group "Delta line", on by default):
+//     line(bar) = SMA or EMA of delta over N chart bars   (N default 20, feel-chosen)
+// drawn over the columns in the same volume units and against the same zero line.
+// Above zero: over the last N bars more volume traded on rising lower-timeframe
+// candles than on falling ones; below zero the reverse. It is tied to price
+// direction by construction (rising candles ARE "buy"), so the line agreeing with
+// a rising price is not independent confirmation. Its level grows with the
+// symbol's volume, so levels years apart are not comparable; the Data Window value
+// "Net share of volume over N bars (%)" = 100 * sum(delta, N) / sum(buy + sell, N)
+// removes that (-100..+100; this normalisation is ORIGINAL, no external authority).
+// SMA and EMA are the standard definitions (Pine built-ins ta.sma / ta.ema).
+// A bar without intrabar data has delta = na, never 0, so the SMA and the share
+// start only after N consecutive covered bars.
+//
+// THE LINE'S CONNECTION TO PRICE (input "Price average on the price chart,
+// coloured by delta", on by default):
+// On the price chart the script draws the SMA or EMA of the CLOSE over the same N
+// bars as the delta line. That is a real price level (standard moving average,
+// Pine built-ins). Its COLOUR on each bar is the sign of the smoothed delta on
+// that bar: Buy colour when the delta line is above zero, Sell colour when below,
+// grey where delta is n/a. So one line carries both: where average price is, and
+// which side volume has been on. The reading worth attention is disagreement —
+// the price average still rising while it has turned Sell colour, or falling
+// while Buy colour. Colouring a price average by delta sign is this script's own
+// device (ORIGINAL, no external authority); the closest published idea is
+// Dormeier's Volume Price Confirmation Indicator (VWMA against SMA, in "Investing
+// with Volume Analysis"), which is NOT implemented here.
+// Delta itself is never drawn on the price chart: a forced-overlay plot shares
+// the price scale (TradingView docs, visuals overview), and delta is in volume
+// units.
+//
+// PLACING IT ON THE CHART: this is an ordinary pane indicator, like
+// systemic_stress.pine: columns and line are plain plot() series and nothing is
+// drawn by the script onto the price chart. To see it against price, move the
+// whole indicator with TradingView's own controls (indicator "..." menu > Move to
+// > Existing pane above, then Pin to scale > a scale of its own). Columns and line
+// move together and share one scale, which can then be dragged like any other.
+// The scale is volume, never price: where a column or the line crosses a candle
+// means nothing. "Show buy/sell columns" off leaves only the line.
+// A position set by dragging the scale with the mouse was observed by the user to
+// be lost on every settings change (the script recalculates and the scale
+// re-fits). So position and size are inputs instead: "Zero line position" and
+// "Size" (group Display) are held by two fully transparent anchor plots that fix
+// the auto-scale range. They need the indicator's scale left on AUTO, and they
+// change the drawing only, never a value. NOT observed: that transparent plots
+// are counted by auto-scale as intended.
+//
+// THIS IS NOT TRUE BUY/SELL VOLUME. Every trade has a buyer and a seller. What is
+// usually meant is which side was the AGGRESSOR (lifted the offer or hit the bid),
+// and that needs tick data with quotes, which Pine does not provide here. This
+// script only knows whether a lower-timeframe candle closed up or down, and gives
+// that candle's whole volume to one side. A 5-minute candle that closed up one
+// cent after heavy selling is counted 100% buy. Read it as "volume that traded
+// while price was rising vs falling at the lower timeframe", nothing more.
+// The split depends on the lower timeframe: a finer one gives a different, usually
+// less lopsided, answer. Two charts with different lower timeframes do not agree.
+//
+// SOURCE:
+//   - Classification rules 1-4 are the method TradingView documents for its own
+//     built-in Cumulative Volume Delta indicator (TradingView support article
+//     "Cumulative Volume Delta", solutions/43000725058, read 2026-11-23): volume
+//     is positive if the intrabar's close exceeds its open, negative if below;
+//     when open equals close it is positive/negative by the close against the
+//     previous intrabar's close; when that is equal too, the intrabar takes the
+//     previous intrabar's positive/negative status. The same article is the
+//     source of the default lower timeframes below. Rule 5 (unclassified when no
+//     previous status exists) is this script's own: the article does not say what
+//     the built-in does there.
+//   - The TradingView "ta" library's requestUpAndDownVolume() does the same job.
+//     It is NOT imported: its Pine source could not be read (the library page
+//     shows documentation only), so agreement with it is expected, not verified.
+//     Per its release notes it also has a tick mode using bid/ask; this script has
+//     no tick mode.
+//   - Rule 3 is the classical tick test (Lee, C. and Ready, M. (1991), "Inferring
+//     Trade Direction from Intraday Data", Journal of Finance 46(2), 733-746)
+//     applied to candles instead of trades; cited for the idea only.
+//   - request.footprint() might give exchange-side buy/sell volume. Not used: its
+//     signature and availability were not verified (same position as
+//     volume_profile.pine).
+//   - Code layout follows TradingView's Pine Script style guide (camelCase names,
+//     "Input" suffix on inputs, SNAKE_CASE constants, section order constants >
+//     inputs > functions > calculations > visuals), read 2026-11-23.
+//
+// LOWER TIMEFRAME (input, blank = auto): the defaults of TradingView's built-in
+// Cumulative Volume Delta (same support article): seconds chart -> 1S; minutes or
+// hours chart -> 1 minute; daily chart -> 5 minutes; anything else (weekly,
+// monthly) -> 60 minutes. TradingView's stated trade-off: a lower timeframe is
+// more precise but covers fewer chart bars. request.*() functions can retrieve up
+// to 200,000 intrabars, plan-dependent (Pine docs, "Other timeframes and data").
+// That budget limits HISTORY: bars older than it get no intrabar data (an empty
+// array, per the same docs page) and are drawn as a grey x on the zero line, never
+// as an estimated or zero column. The status cell shows how many loaded bars are
+// covered and from which date.
+//
+// DEGRADING VISIBLY (guardrail 5):
+//   - No intrabar data for a bar -> no columns, grey x at zero.
+//   - Intrabar volume is compared with the bar's own volume. On the user's data
+//     that ratio is about 0.10, not 1 (see the compile check), so a bar is NOT
+//     judged against 1. It is judged against the median ratio of the last 50
+//     bars: if it differs by more than the "Coverage tolerance" input (default
+//     50%, a guess), or an intrabar had a na close/volume and was skipped, or
+//     some volume was unclassified, the columns are drawn in MUTED colours. The
+//     status cell always states this bar's ratio and the typical one, and says
+//     "columns are a SAMPLE of the market" whenever the typical ratio is below
+//     0.9. Columns are the sum of what was classified, never scaled up.
+//   - A lower timeframe higher than the chart's -> n/a with the reason; the
+//     request result is not read.
+//   - Bars before intrabar coverage starts show nothing; the status cell gives
+//     the first covered date. A grey x marks only a gap INSIDE the coverage.
+//   - "Delta line magnification" (default 1 = true scale) multiplies the DRAWN
+//     line only, because the smoothed delta is typically a hundredth of a column
+//     and reads as a flat line. It is a display distortion, declared: the status
+//     cell says when it is on, and the Data Window keeps the true value.
+//   - Non-standard charts (Heikin Ashi, Renko, ...) -> n/a: their open/close are
+//     synthetic and would decide the classification.
+//   - A symbol whose volume is a tick count (FX/CFD) gives ticks-while-rising vs
+//     ticks-while-falling; the script cannot tell.
+//
+// REPAINT: closed bars do not change within a session. The developing bar's
+// columns grow and can shift between sides as its intrabars print, exactly as its
+// volume column does; it is final at the bar's close. TradingView's docs state
+// that request.security_lower_tf() is "not immune to repainting": intrabar data
+// can differ slightly after the script reloads. No signal or alert is derived
+// here, so nothing acts on an unconfirmed value. request.security_lower_tf() has
+// no lookahead argument: intrabars belong to the chart bar they are inside.
+//
+// COMPILE CHECK (2026-11-23, run by an agent driving the user's TradingView
+// session in a browser; method in docs/testing-methodology.md):
+//   Observed: this version (code identical to this file, with full-line comments
+//   and tooltips removed and a temporary Pine Logs block appended; the scratch
+//   copy was not saved) was added to a BATS:SPY 1D chart and the editor reported
+//   "Added to chart" with no error. Columns, the delta line, the status cell and
+//   the coloured price average on the price chart all rendered.
+//   Independent recomputation: for the confirmed daily bar of 2026-11-20 the
+//   script logged its 78 raw 5-minute intrabars (open, close, volume) and its own
+//   results. The values were recomputed outside TradingView (Python, written
+//   from the support article's wording, sharing no code with this script) and
+//   matched exactly: buy 7,200,255; sell 7,451,662; unclassified 0; delta
+//   -251,407; intrabar/bar ratio 0.0967676899; SMA(20) of delta 18,080.3; net
+//   share 0.2754685367 %; SMA(20) of close 747.8075.
+//   On the live bar the status cell's buy - sell (about -137K) agreed with
+//   TradingView's built-in Volume Delta legend (-136.98K) at the same moment.
+//   Later the same day the file was revised (coverage judged against the typical
+//   ratio instead of 1, lower-timeframe guard, delta line magnification, layout
+//   anchors following what is shown, x markers only inside coverage). The
+//   revised file, complete and unmodified, was pasted into the user's saved
+//   script and added to the same BATS:SPY 1D chart: "Added to chart", no error.
+//   Observed on it: solid (not muted) columns, a black status cell reading
+//   "intraday data holds 12.7% of this bar's volume (typical 11.3%)" and
+//   "columns are a SAMPLE of the market, not all of it". The independent
+//   recomputation above was made on the version BEFORE this revision; the
+//   classification and smoothing code it covers was not changed by the revision,
+//   but it was not re-run.
+// WHAT THE CHECK FOUND ABOUT THE DATA — READ THIS:
+//   On that SPY bar the intrabar volume was 14,651,917 against a daily bar volume
+//   of 151,413,318: a ratio of 0.097. The intraday bars on this account come from
+//   one venue (the chart's ticker resolves to BATS:SPY) while the daily bar
+//   carries far more volume. So the columns and delta describe roughly a tenth of
+//   the day's volume. Judged against 1, every bar was drawn MUTED with CHECK,
+//   which carried no information; that is why a bar is now judged against the
+//   typical ratio and the status cell states the sample plainly instead.
+//   TradingView's own Volume Delta has the same limit (it agreed with this
+//   script). The split is an estimate from a sample of the market.
+// NOT VERIFIED (nothing below was observed in the check above):
+//   - Rules 3 and 4 (flat intrabars): none of the 78 intrabars had open == close,
+//     so only rules 1 and 2 were exercised on real data.
+//   - Rule 5, na-skipped intrabars, bars with no intrabar data, and the
+//     unsupported-chart branch.
+//   - The revision's own paths: a bar actually flagged by the coverage
+//     tolerance, the lower-timeframe guard's n/a, a magnification other than 1,
+//     and how ta.median treats na values inside its window.
+//   - The EMA option, the weekly (60-minute) and intraday paths, and any symbol
+//     other than SPY.
+//   - Realtime behaviour across a bar close, and whether values differ after a
+//     reload.
+//   - That the transparent layout anchors hold "Zero line position" and "Size"
+//     as intended, and that negative values read sensibly with format.volume.
+//   - How many bars the intrabar budget covers on other timeframes (on this
+//     chart: 1,288 of 6,513 daily bars, from 2021-10-07).
+//@version=6
+indicator("Buy/Sell Volume (intrabar estimate)", shorttitle = "BuySellVol", overlay = false, format = format.volume)
+
+// ===== CONSTANTS =====
+string GRP_DATA      = "Data"
+string GRP_LINE      = "Delta line"
+string GRP_DISPLAY   = "Display"
+string MA_SMA        = "SMA"
+string MA_EMA        = "EMA"
+string POS_TR        = "top_right"
+string POS_TL        = "top_left"
+string POS_BR        = "bottom_right"
+string POS_BL        = "bottom_left"
+// Default lower timeframes of TradingView's built-in Cumulative Volume Delta.
+string LTF_SECONDS   = "1S"
+string LTF_INTRADAY  = "1"
+string LTF_DAILY     = "5"
+string LTF_OTHER     = "60"
+// Bars over which the layout anchors look for the largest value. Display only.
+int    PEAK_BARS     = 250
+// Transparency of columns on a bar flagged as incomplete.
+int    MUTED_TRANSP  = 65
+// Bars over which the typical intrabar-to-bar volume ratio (a median) is taken.
+int    RATIO_BARS    = 50
+// Below this typical ratio the status cell says the columns are a sample.
+float  SAMPLE_BELOW  = 0.9
+color  NEUTRAL_COLOR = color.new(color.gray, 30)
+color  HIDDEN_COLOR  = color.new(color.white, 100)
+
+// ===== INPUTS =====
+string ltfInput         = input.timeframe("", "Lower-Timeframe Override (blank = auto)", group = GRP_DATA,
+     tooltip = "Blank uses TradingView's own Cumulative Volume Delta defaults: 1S on seconds charts, 1 minute on minute and hour charts, 5 minutes on Daily, 60 minutes on Weekly and above. Must not be higher than the chart timeframe, else every bar is n/a. A finer timeframe classifies better but covers less history.")
+float  toleranceInput   = input.float(50.0, "Coverage tolerance (%)", minval = 1.0, maxval = 95.0, step = 5.0, group = GRP_DATA,
+     tooltip = "Each bar's intrabar volume is compared with the bar's own volume. That ratio is normally well below 100% (intraday data often comes from one venue). A bar whose ratio differs from the typical ratio of the last 50 covered bars by more than this is drawn muted: its intrabar data is probably incomplete. Default is a guess, not derived from any source.")
+
+bool   showLineInput    = input.bool(true, "Show smoothed delta line", group = GRP_LINE,
+     tooltip = "Moving average of (buy - sell) drawn over the columns, in the same volume units. Above zero: over the last N bars more volume traded on rising lower-timeframe candles than on falling ones.")
+int    lengthInput      = input.int(20, "Smoothing length (bars)", minval = 2, maxval = 500, group = GRP_LINE,
+     tooltip = "Chart bars averaged. 20 daily bars is about a month; 20 weekly bars about five months. Longer = smoother and slower. Feel-chosen default, not derived from any source.")
+string maTypeInput      = input.string(MA_SMA, "Average type", options = [MA_SMA, MA_EMA], group = GRP_LINE,
+     tooltip = "SMA: plain average of the last N bars. EMA: weights recent bars more, reacts faster.")
+float  lineGainInput    = input.float(1.0, "Delta line magnification (x)", minval = 1.0, maxval = 200.0, step = 1.0, group = GRP_LINE,
+     tooltip = "The smoothed delta is usually far smaller than the buy/sell columns, so at 1 it looks like a flat line on zero. This multiplies the DRAWN line only, to make its shape visible; try 10 to 30. The true value stays in the Data Window ('Smoothed delta (true value)') and the status cell says when a magnification is on.")
+color  lineColorInput   = input.color(#f5c542, "Delta line", group = GRP_LINE)
+bool   showPriceMaInput = input.bool(true, "Price average on the price chart, coloured by delta", group = GRP_LINE,
+     tooltip = "Draws the moving average of the CLOSE (same length and type as the delta line) on the price chart. It is a real price level. Its colour is the sign of the smoothed delta on that bar: Buy colour above zero, Sell colour below, grey where delta is n/a.")
+
+bool   showColumnsInput = input.bool(true, "Show buy/sell columns", group = GRP_DISPLAY,
+     tooltip = "Off: only the smoothed delta line is plotted. Useful when the indicator has been moved onto the price chart and the columns hide the candles.")
+float  zeroPosInput     = input.float(50.0, "Zero line position (% of pane height, from bottom)", minval = 5.0, maxval = 95.0, step = 5.0, group = GRP_DISPLAY,
+     tooltip = "Where the zero line sits in the indicator's pane. 50 = middle, 15 = near the bottom, 85 = near the top. Held by the script, so it survives a settings change, unlike dragging with the mouse. Needs the indicator's scale on auto. Display only; no value changes.")
+float  sizeInput        = input.float(45.0, "Size (% of pane height, each side of zero)", minval = 2.0, maxval = 50.0, step = 1.0, group = GRP_DISPLAY,
+     tooltip = "How tall the biggest recent column is, as a share of the pane. 45 = fills the pane when zero is in the middle; 10 = a thin strip. Display only; no value changes.")
+string tablePosInput    = input.string(POS_TR, "Status cell position", options = [POS_TR, POS_TL, POS_BR, POS_BL], group = GRP_DISPLAY)
+color  buyColorInput    = input.color(#26a69a, "Buy", group = GRP_DISPLAY)
+color  sellColorInput   = input.color(#ef5350, "Sell", group = GRP_DISPLAY)
+
+// ===== FUNCTIONS =====
+// @function Default lower timeframe for the chart's timeframe (TradingView's
+//           Cumulative Volume Delta defaults). Uses no global variables.
+// @returns  A timeframe string.
+autoLowerTf() =>
+    timeframe.isseconds ? LTF_SECONDS : timeframe.isintraday ? LTF_INTRADAY : timeframe.isdaily ? LTF_DAILY : LTF_OTHER
+
+// @function Direction of one intrabar by the documented rule.
+// @param o        Intrabar open (may be na).
+// @param c        Intrabar close (not na).
+// @param prevC    Close of the previous classified intrabar, or na.
+// @param prevDir  Direction of the previous classified intrabar: 1, -1, or 0 if none.
+// @returns        1 = buy, -1 = sell, 0 = unclassified.
+intrabarDirection(float o, float c, float prevC, int prevDir) =>
+    int result = prevDir
+    if not na(o) and c > o
+        result := 1
+    else if not na(o) and c < o
+        result := -1
+    else if not na(prevC) and c > prevC
+        result := 1
+    else if not na(prevC) and c < prevC
+        result := -1
+    result
+
+// @function Table position constant for a position input string.
+tablePosition(string pos) =>
+    pos == POS_TL ? position.top_left : pos == POS_BR ? position.bottom_right : pos == POS_BL ? position.bottom_left : position.top_right
+
+// @function A ratio as percent text, "n/a" when missing.
+pctText(float x) =>
+    na(x) ? "n/a" : str.tostring(x * 100.0, "#.0") + "%"
+
+// @function Volume as text, "n/a" when missing.
+volText(float x) =>
+    na(x) ? "n/a" : str.tostring(x, format.volume)
+
+// ===== CALCULATIONS =====
+// ----- Lower timeframe and intrabar fetch -----
+string lowerTf = ltfInput == "" ? autoLowerTf() : ltfInput
+// Non-standard charts have synthetic open/close: n/a rather than a classification.
+bool   chartOk = chart.is_standard
+
+// The lower timeframe must not be higher than the chart's. With
+// ignore_invalid_timeframe the request would return na instead of arrays, so an
+// invalid choice is caught here: the request is pointed at the chart's own
+// timeframe, its result is never read, and the status cell says why.
+bool   ltfOk     = timeframe.in_seconds(lowerTf) <= timeframe.in_seconds()
+string requestTf = ltfOk ? lowerTf : timeframe.period
+
+// One tuple request (no lookahead parameter exists on this function). A bar with
+// no intrabars returns empty arrays.
+[ltfOpens, ltfCloses, ltfVolumes] = request.security_lower_tf(syminfo.tickerid, requestTf, [open, close, volume],
+     ignore_invalid_timeframe = true)
+
+// ----- Classification -----
+// Carried across chart bars. Plain var: rolled back on every realtime tick, so the
+// developing bar is always classified from the state at its own start.
+var float prevIntrabarClose = na
+var int   prevDirection     = 0
+
+float buyVolume     = 0.0
+float sellVolume    = 0.0
+float unknownVolume = 0.0
+int   skippedCount  = 0
+int   intrabarCount = chartOk and ltfOk ? array.size(ltfCloses) : 0
+
+if intrabarCount > 0
+    // Guarded: "for k = 0 to -1" would count DOWN and run twice.
+    for k = 0 to intrabarCount - 1
+        float o = array.get(ltfOpens, k)
+        float c = array.get(ltfCloses, k)
+        float v = array.get(ltfVolumes, k)
+        if na(c) or na(v)
+            skippedCount += 1
+        else
+            int direction = intrabarDirection(o, c, prevIntrabarClose, prevDirection)
+            if direction == 1
+                buyVolume += v
+            else if direction == -1
+                sellVolume += v
+            else
+                unknownVolume += v
+            if direction != 0
+                prevDirection := direction
+            prevIntrabarClose := c
+
+bool  hasData       = intrabarCount > 0 and skippedCount < intrabarCount
+float intrabarTotal = buyVolume + sellVolume + unknownVolume
+float volumeRatio   = hasData and volume > 0 ? intrabarTotal / volume : na
+// Typical ratio over the last RATIO_BARS bars. The ratio is rarely near 1 (the
+// intraday feed is often one venue), so a bar is judged against what is normal
+// for this symbol, not against 1. No typical value yet -> not judged.
+float typicalRatio  = ta.median(volumeRatio, RATIO_BARS)
+bool  offTolerance  = not na(volumeRatio) and not na(typicalRatio) and typicalRatio > 0 and
+     math.abs(volumeRatio / typicalRatio - 1.0) > toleranceInput / 100.0
+bool  isPartial     = hasData and (offTolerance or skippedCount > 0 or unknownVolume > 0)
+float delta         = hasData ? buyVolume - sellVolume : na
+
+// ----- Smoothed delta -----
+// Built-ins run on every bar (never inside a conditional) so their history is
+// consistent; the inputs only select what is shown. delta is na on a bar without
+// intrabar data, so the SMA and the share are na until N consecutive covered bars
+// exist; the EMA is seeded from the first covered bars (first N values = warm-up).
+float deltaSma    = ta.sma(delta, lengthInput)
+float deltaEma    = ta.ema(delta, lengthInput)
+float deltaLine   = maTypeInput == MA_EMA ? deltaEma : deltaSma
+float deltaSum    = math.sum(delta, lengthInput)
+float classedSum  = math.sum(hasData ? buyVolume + sellVolume : na, lengthInput)
+float netSharePct = classedSum > 0 ? 100.0 * deltaSum / classedSum : na
+// The line as DRAWN: magnified for visibility only. deltaLine stays the value.
+float deltaLineDrawn = deltaLine * lineGainInput
+
+// ----- Price average, coloured by the smoothed delta's sign -----
+// A forced-overlay plot shares the main chart's PRICE scale, so only a value in
+// price units may go there: the average of close, never delta itself.
+float priceSma   = ta.sma(close, lengthInput)
+float priceEma   = ta.ema(close, lengthInput)
+float priceLine  = maTypeInput == MA_EMA ? priceEma : priceSma
+color priceColor = na(deltaLine) ? NEUTRAL_COLOR : deltaLine > 0 ? buyColorInput : deltaLine < 0 ? sellColorInput : NEUTRAL_COLOR
+
+// ----- Layout anchors (display only) -----
+// Two fully transparent series that fix the pane's auto-scale range so the zero
+// line sits at zeroPosInput % of the pane and the largest recent value spans
+// sizeInput % of it. They carry no information.
+float columnPeak = showColumnsInput ? math.max(buyVolume, sellVolume) : 0.0
+float linePeak   = showLineInput ? nz(math.abs(deltaLineDrawn)) : 0.0
+float barPeak    = hasData ? math.max(columnPeak, linePeak) : 0.0
+float recentPeak = ta.highest(barPeak, PEAK_BARS)
+float scaleSpan  = recentPeak > 0 ? recentPeak / (sizeInput / 100.0) : na
+float anchorTop  = scaleSpan * (1.0 - zeroPosInput / 100.0)
+float anchorBot  = -scaleSpan * (zeroPosInput / 100.0)
+
+// ----- Coverage counters -----
+var int barCount       = 0
+var int coveredCount   = 0
+var int firstCoverTime = na
+barCount += 1
+if hasData
+    coveredCount += 1
+    if na(firstCoverTime)
+        firstCoverTime := time
+
+// ===== VISUALS =====
+color buyColumnColor  = isPartial ? color.new(buyColorInput, MUTED_TRANSP) : buyColorInput
+color sellColumnColor = isPartial ? color.new(sellColorInput, MUTED_TRANSP) : sellColorInput
+
+plot(hasData and showColumnsInput ? buyVolume : na, "Buy volume (estimate)", color = buyColumnColor, style = plot.style_columns)
+plot(hasData and showColumnsInput ? -sellVolume : na, "Sell volume (estimate, negative)", color = sellColumnColor, style = plot.style_columns)
+hline(0, "Zero", color = color.new(color.gray, 40), linestyle = hline.style_solid)
+// A grey x marks a bar with no intrabar data INSIDE the covered history. Bars
+// before coverage starts are not marked one by one: the status cell gives the date.
+plotchar(hasData or coveredCount == 0 ? na : 0.0, "No intrabar data", char = "×", location = location.absolute, color = color.new(color.gray, 20), size = size.tiny)
+
+plot(showLineInput ? deltaLineDrawn : na, "Smoothed delta (as drawn, magnified if set)", color = lineColorInput, linewidth = 2, style = plot.style_linebr)
+plot(showPriceMaInput ? priceLine : na, "Price average, coloured by smoothed delta", color = priceColor, linewidth = 2, force_overlay = true)
+
+plot(anchorTop, "Layout anchor (top)", color = HIDDEN_COLOR, display = display.pane, editable = false)
+plot(anchorBot, "Layout anchor (bottom)", color = HIDDEN_COLOR, display = display.pane, editable = false)
+
+// Data Window only.
+plot(netSharePct, "Net share of volume over N bars (%)", display = display.data_window, format = format.price, precision = 1)
+plot(deltaLine, "Smoothed delta (true value)", display = display.data_window)
+plot(delta, "Delta (buy - sell)", display = display.data_window)
+plot(volumeRatio, "Intrabar volume / bar volume", display = display.data_window, format = format.price, precision = 3)
+plot(typicalRatio, "Typical intrabar / bar volume", display = display.data_window, format = format.price, precision = 3)
+plot(hasData ? unknownVolume : na, "Unclassified volume", display = display.data_window)
+
+// ----- Status cell (last bar): always present, "n/a — reason" when unavailable -----
+var table statusTable = table.new(tablePosition(tablePosInput), 1, 1, border_width = 1)
+
+if barstate.islast
+    string statusText  = ""
+    color  statusColor = color.new(color.gray, 70)
+    if not chartOk
+        statusText := "n/a — unsupported chart (needs a standard chart type)"
+    else if not ltfOk
+        statusText := "n/a — lower timeframe " + lowerTf + " is higher than the chart's"
+    else if coveredCount == 0
+        statusText := "n/a — no intrabar data on any loaded bar (lower timeframe " + lowerTf + ")"
+    else
+        statusText := "estimate from " + lowerTf + " candles, not true buy/sell\n" +
+             "covered " + str.tostring(coveredCount) + " of " + str.tostring(barCount) + " bars, from " +
+             str.format_time(firstCoverTime, "yyyy-MM-dd", syminfo.timezone) + "\n"
+        if not hasData
+            statusText += "this bar: n/a — no intrabar data"
+        else
+            float classed = buyVolume + sellVolume
+            statusText += "this bar: buy " + volText(buyVolume) + "  sell " + volText(sellVolume) +
+                 (classed > 0 ? "  (" + str.tostring(100.0 * buyVolume / classed, "#") + "% buy)" : "") + "\n" +
+                 "intraday data holds " + pctText(volumeRatio) + " of this bar's volume (typical " + pctText(typicalRatio) + ")" +
+                 (offTolerance ? " — CHECK" : "")
+            if not na(typicalRatio) and typicalRatio < SAMPLE_BELOW
+                statusText += "\ncolumns are a SAMPLE of the market, not all of it"
+            if showLineInput and lineGainInput != 1.0
+                statusText += "\ndelta line drawn x" + str.tostring(lineGainInput) + " (true value in Data Window)"
+            if skippedCount > 0
+                statusText += "\n" + str.tostring(skippedCount) + " na intrabar(s) skipped"
+            if unknownVolume > 0
+                statusText += "\nunclassified " + volText(unknownVolume)
+            statusColor := isPartial ? color.new(color.orange, 60) : color.new(color.black, 40)
+    table.cell(statusTable, 0, 0, statusText, text_color = color.white, bgcolor = statusColor, text_halign = text.align_left, text_size = size.small)
